@@ -1,5 +1,6 @@
 """Format-agnostic data model for tracks and their tags."""
 
+import re
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -24,6 +25,14 @@ class TagSet:
 
 
 FIELD_NAMES: tuple[str, ...] = tuple(f.name for f in fields(TagSet))
+
+_YEAR = re.compile(r"\d{4}(-(0[1-9]|1[0-2])(-(0[1-9]|[12]\d|3[01]))?)?")
+YEAR_FORMATS = "YYYY, YYYY-MM or YYYY-MM-DD"
+
+
+def is_valid_year(value: str) -> bool:
+    """Empty (field removed) or a date of the form YYYY, YYYY-MM or YYYY-MM-DD."""
+    return not value or _YEAR.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)

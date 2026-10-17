@@ -6,7 +6,7 @@ from pathlib import Path
 
 from nicegui import ui
 
-from mp3tagger.core.models import Track
+from mp3tagger.core.models import TagSet, Track
 
 
 @dataclass(frozen=True)
@@ -53,11 +53,13 @@ DEFAULT_VISIBLE: list[str] = [c.field for c in COLUMNS if c.default_visible]
 SelectionHandler = Callable[[list[Path]], Awaitable[None] | None]
 
 
-def track_row(track: Track) -> dict:
+def track_row(track: Track, tags: TagSet | None = None, dirty: bool = False) -> dict:
+    """Grid row for a track. `tags` are the effective tags (original plus pending edits)."""
     return {
         "id": str(track.path),
+        "dirty": dirty,
         "filename": track.filename,
-        **track.tags.as_dict(),
+        **(tags or track.tags).as_dict(),
         "duration": track.info.duration or None,  # raw numbers; the columns format them
         "bitrate": track.info.bitrate or None,
         "sample_rate": track.info.sample_rate or None,
@@ -67,9 +69,13 @@ def track_row(track: Track) -> dict:
     }
 
 
+DIRTY_ROW_CSS = ".row-dirty { font-style: italic; color: var(--q-warning) !important; }"
+
+
 class FileGrid:
     def __init__(self, on_selection: SelectionHandler | None = None) -> None:
         self._on_selection = on_selection
+        ui.add_css(DIRTY_ROW_CSS)
         self.grid = ui.aggrid(
             {
                 "columnDefs": [
@@ -87,15 +93,33 @@ class FileGrid:
                 "rowData": [],
                 "rowSelection": {"mode": "multiRow", "enableClickSelection": True},
                 ":getRowId": "(params) => params.data.id",
+                "rowClassRules": {"row-dirty": "data.dirty"},
                 "enableCellTextSelection": True,
             },
             auto_size_columns=False,
         ).classes("w-full h-full")
         self.grid.on("selectionChanged", self._selection_changed)
 
-    def set_tracks(self, tracks: list[Track]) -> None:
-        self.grid.options["rowData"] = [track_row(t) for t in tracks]
-        self.grid.update()
+    def set_rows(self, rows: list[dict]) -> None:
+        """Replace all rows. Sorting and column visibility are kept (no grid rebuild)."""
+        self._mirror_rows(rows)
+        self.grid.run_grid_method("setGridOption", "rowData", rows)
+
+    def update_rows(self, rows: list[dict]) -> None:
+        """Update existing rows in place. Selection and sorting are kept (no grid rebuild)."""
+        by_id = {row["id"]: row for row in rows}
+        known = self.grid.options["rowData"]
+        for i, existing in enumerate(known):
+            if existing["id"] in by_id:
+                known[i] = by_id[existing["id"]]
+        self.grid.run_grid_method("applyTransaction", {"update": rows})
+
+    def _mirror_rows(self, rows: list[dict]) -> None:
+        # `options` is an observable dict: assigning to it makes NiceGUI rebuild the whole grid on
+        # the client, losing selection, sorting and column state. The rows are pushed to the
+        # client with run_grid_method instead; this only keeps the server-side copy in sync (for
+        # reading the rows back), so it bypasses the observer with the plain dict method.
+        dict.__setitem__(self.grid.options, "rowData", rows)
 
     def set_visible_columns(self, visible: list[str]) -> None:
         shown = [c.field for c in COLUMNS if c.field in visible]
