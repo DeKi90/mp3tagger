@@ -79,6 +79,12 @@ class EditBuffer:
         """End the current edit so the next change starts a new undo step."""
         self._open_edit = None
 
+    def undo_open_edit(self, field: str) -> list[Path]:
+        """Undo the edit currently in progress if it is on `field`. Returns the affected paths."""
+        if self._open_edit is None or self._open_edit[1] != field:
+            return []
+        return self.undo()
+
     def undo(self) -> list[Path]:
         """Revert the last edit step. Returns the affected paths."""
         if not self._undo:

@@ -109,3 +109,18 @@ def test_load_resets_everything(buf):
     buf.load([Track(B, TagSet())])
     assert buf.paths == [B]
     assert buf.dirty_paths() == [] and not buf.can_undo
+
+
+def test_undo_open_edit_only_for_the_edited_field(buf):
+    buf.set_field([A, B], "artist", "Z")
+    assert buf.undo_open_edit("title") == []  # a different field is not the open edit
+    assert buf.dirty_paths() == [A, B]
+    assert set(buf.undo_open_edit("artist")) == {A, B}
+    assert buf.dirty_paths() == []
+
+
+def test_undo_open_edit_after_edit_was_broken_does_nothing(buf):
+    buf.set_field([A], "title", "T")
+    buf.break_edit()
+    assert buf.undo_open_edit("title") == []
+    assert buf.is_dirty(A)

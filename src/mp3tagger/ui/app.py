@@ -5,6 +5,7 @@ from pathlib import Path
 from nicegui import events, run, ui
 
 from mp3tagger.config import Config
+from mp3tagger.core.batch import KEEP, merge_tags
 from mp3tagger.core.editing import EditBuffer
 from mp3tagger.core.library import scan_folder
 from mp3tagger.core.saving import write_changes
@@ -14,7 +15,7 @@ from mp3tagger.services.fs import PathOutsideRootsError, Sandbox
 from mp3tagger.ui.dialogs.confirm import confirm
 from mp3tagger.ui.dialogs.folder_browser import pick_folder
 from mp3tagger.ui.file_grid import COLUMN_LABELS, DEFAULT_VISIBLE, FileGrid, track_row
-from mp3tagger.ui.tag_panel import TagPanel
+from mp3tagger.ui.tag_panel import TagPanel, format_info
 
 VERSION_CHOICES = {"keep": "Keep ID3v2 version", 3: "ID3v2.3", 4: "ID3v2.4"}
 
@@ -94,16 +95,34 @@ def build_app(config: Config) -> None:
             if paths:
                 grid.update_rows([row(p) for p in paths])
 
+        def editable_paths() -> list[Path]:
+            """The selected files that could be read and so can be edited."""
+            return [p for p in selected if not buffer.track(p).error]
+
+        def pending_fields(paths: list[Path]) -> set[str]:
+            return {field for p in paths for field in buffer.pending(p)}
+
         def refresh_panel() -> None:
-            if len(selected) == 1:
-                path = selected[0]
-                panel.show_track(
-                    buffer.track(path), buffer.effective_tags(path), set(buffer.pending(path))
-                )
-            elif selected:
-                panel.show_message(f"{len(selected)} files selected. Select one file to edit it.")
-            else:
+            editable = editable_paths()
+            if not selected:
                 panel.show_message("Select a file to edit its tags")
+            elif not editable and len(selected) == 1:
+                path = selected[0]
+                panel.show_message(f"{path.name} cannot be edited: {buffer.track(path).error}")
+            elif not editable:
+                panel.show_message("None of the selected files can be edited")
+            else:
+                merged = merge_tags([buffer.effective_tags(p) for p in editable])
+                if len(selected) == 1:
+                    track = buffer.track(editable[0])
+                    heading, info = track.filename, format_info(track)
+                else:
+                    heading = f"{len(selected)} files selected"
+                    skipped = len(selected) - len(editable)
+                    info = f"{KEEP} fields differ between files and stay unchanged unless edited."
+                    if skipped:
+                        info += f" {skipped} unreadable file(s) are skipped."
+                panel.show(heading, info, merged, pending_fields(editable))
 
         def refresh_status() -> None:
             nonlocal unload_guard_active
@@ -140,11 +159,18 @@ def build_app(config: Config) -> None:
             refresh_status()
 
         def on_panel_change(field: str, value: str) -> None:
-            if len(selected) != 1:
+            editable = editable_paths()
+            if not editable:
                 return
-            changed = buffer.set_field(selected, field, value)
-            refresh_rows(changed)
-            panel.mark_dirty(set(buffer.pending(selected[0])))
+            if len(editable) > 1 and value == KEEP:
+                # The user put `<keep>` back: drop the edit in progress. If there is none, the
+                # re-render below shows the actual values again.
+                refresh_rows(buffer.undo_open_edit(field))
+                refresh_panel()
+            else:
+                refresh_rows(buffer.set_field(editable, field, value))
+                mixed = merge_tags([buffer.effective_tags(p) for p in editable]).mixed
+                panel.mark_state(pending_fields(editable), mixed)
             refresh_status()
 
         def undo() -> None:

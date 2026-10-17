@@ -241,14 +241,95 @@ async def test_failure_of_one_file_does_not_block_the_other(user: User, music_ro
     assert row_for(user, a)["dirty"] is True and row_for(user, b)["dirty"] is False
 
 
-async def test_multiple_selected_files_show_hint_instead_of_form(
-    user: User, music_root, monkeypatch
-):
+# --- batch editing ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def batch(user: User, music_root, monkeypatch):
+    """A folder is open and a.mp3 (Alpha, 2000) and b.mp3 (Beta, 2001) are both selected."""
     await open_folder(user, music_root, "rock")
     rock = music_root / "rock"
-    await select(user, monkeypatch, rock / "a.mp3", rock / "b.mp3")
+    a, b = rock / "a.mp3", rock / "b.mp3"
+    await select(user, monkeypatch, a, b)
+    return a, b
+
+
+async def test_multi_select_shows_keep_for_differing_fields(user: User, batch):
     await user.should_see("2 files selected")
-    await user.should_see("2 selected")
+    assert field(user, "Title").value == "<keep>"
+    assert field(user, "Year").value == "<keep>"
+    assert field(user, "Artist").value == "Band"  # identical in both files
+    assert field(user, "Genre").value == ""
+
+
+async def test_batch_edit_applies_to_all_files_and_keeps_other_fields(user: User, batch):
+    a, b = batch
+    type_into(user, "Artist", "New Band")
+    for path in batch:
+        assert row_for(user, path)["artist"] == "New Band"
+        assert row_for(user, path)["dirty"] is True
+    assert [row_for(user, p)["title"] for p in batch] == ["Alpha", "Beta"]
+    await user.should_see("2 modified")
+    click(user, "Save")
+    await user.should_see("Saved 2 file(s)")
+    for path, title in ((a, "Alpha"), (b, "Beta")):
+        tags = ID3(path)
+        assert tags["TPE1"].text == ["New Band"]
+        assert tags["TIT2"].text == [title]  # <keep> field untouched
+
+
+async def test_batch_edit_of_a_differing_field_overwrites_all(user: User, batch):
+    type_into(user, "Year", "1999")
+    assert [row_for(user, p)["year"] for p in batch] == ["1999", "1999"]
+
+
+async def test_clearing_a_field_in_batch_clears_it_everywhere(user: User, batch):
+    type_into(user, "Title", "")
+    assert [row_for(user, p)["title"] for p in batch] == ["", ""]
+    click(user, "Save")
+    await user.should_see("Saved 2 file(s)")
+    assert all("TIT2" not in ID3(p) for p in batch)
+
+
+async def test_typing_keep_back_restores_the_previous_values(user: User, batch):
+    type_into(user, "Title", "Same")
+    type_into(user, "Title", "<keep>")
+    assert [row_for(user, p)["title"] for p in batch] == ["Alpha", "Beta"]
+    assert not any(row_for(user, p)["dirty"] for p in batch)
+    assert field(user, "Title").value == "<keep>"
+
+
+async def test_keep_without_an_edit_in_progress_shows_the_real_value_again(user: User, batch):
+    type_into(user, "Artist", "<keep>")  # nothing was edited: keep the files' own value
+    assert field(user, "Artist").value == "Band"
+    assert not any(row_for(user, p)["dirty"] for p in batch)
+
+
+async def test_undo_reverts_the_whole_batch_edit(user: User, batch):
+    type_into(user, "Artist", "New Band")
+    click(user, "Undo")
+    assert [row_for(user, p)["artist"] for p in batch] == ["Band", "Band"]
+    assert field(user, "Artist").value == "Band"
+
+
+async def test_unreadable_files_are_skipped_in_a_batch(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    (rock / "bad.mp3").write_bytes(b"junk")
+    await open_folder(user, music_root, "rock")
+    paths = [rock / "a.mp3", rock / "b.mp3", rock / "bad.mp3"]
+    await select(user, monkeypatch, *paths)
+    await user.should_see("3 files selected")
+    await user.should_see("1 unreadable file(s) are skipped")
+    type_into(user, "Artist", "New Band")
+    assert [row_for(user, p)["dirty"] for p in paths] == [True, True, False]
+
+
+async def test_selecting_only_unreadable_files_shows_message(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    (rock / "bad.mp3").write_bytes(b"junk")
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "bad.mp3")
+    await user.should_see("bad.mp3 cannot be edited")
 
 
 async def test_edits_do_not_rebuild_the_grid(user: User, editing, monkeypatch):

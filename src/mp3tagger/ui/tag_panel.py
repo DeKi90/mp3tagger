@@ -1,10 +1,12 @@
 """Editor for the tags of the selected file."""
 
+import json
 from collections.abc import Callable
 from dataclasses import fields
 
 from nicegui import ui
 
+from mp3tagger.core.batch import MergedTags
 from mp3tagger.core.models import FIELD_NAMES, YEAR_FORMATS, TagSet, Track, is_valid_year
 
 LABELS = {
@@ -21,7 +23,12 @@ LABELS = {
 }
 assert set(LABELS) == {f.name for f in fields(TagSet)}
 
-DIRTY_PROPS = "bg-color=amber-1"  # highlights fields with unsaved changes
+
+def _toggle_prop(element: ui.element, prop: str, on: bool) -> None:
+    if on:
+        element.props(prop)
+    else:
+        element.props(remove=prop.split("=")[0])
 
 
 def format_info(track: Track) -> str:
@@ -50,7 +57,7 @@ class TagPanel:
             self._message = ui.label().classes("text-grey")
             self._form = ui.column().classes("w-full gap-1")
             with self._form:
-                self._filename = ui.label().classes("text-subtitle2 break-all")
+                self._heading = ui.label().classes("text-subtitle2 break-all")
                 self._info = ui.label().classes("text-caption text-grey")
                 for name in FIELD_NAMES:
                     self._inputs[name] = self._make_input(name)
@@ -78,29 +85,40 @@ class TagPanel:
         self._message.set_visibility(True)
         self._form.set_visibility(False)
 
-    def show_track(self, track: Track, tags: TagSet, dirty_fields: set[str]) -> None:
-        """Show `tags` (original plus pending edits) of a single track."""
-        if track.error:
-            self.show_message(f"{track.filename} cannot be edited: {track.error}")
-            return
+    def show(self, heading: str, info: str, merged: MergedTags, dirty_fields: set[str]) -> None:
+        """Show the merged tags of one or more tracks (differing fields read `<keep>`)."""
         self._message.set_visibility(False)
         self._form.set_visibility(True)
-        self._filename.text = track.filename
-        self._info.text = format_info(track)
+        self._heading.text = heading
+        self._info.text = info
         self._updating = True
         try:
-            for name, value in tags.as_dict().items():
+            for name, value in merged.values.items():
                 self._inputs[name].value = value
         finally:
             self._updating = False
-        self.mark_dirty(dirty_fields)
+        self._sync_browser_text(merged.values)
+        self.mark_state(dirty_fields, merged.mixed)
 
-    def mark_dirty(self, dirty_fields: set[str]) -> None:
+    def _sync_browser_text(self, values: dict[str, str]) -> None:
+        """Make the browser show `values` even where it holds different text for an input.
+
+        NiceGUI's input keeps what the user typed in local state and only follows changes of the
+        server-side value. Setting a value equal to the last one the server knew (restoring
+        "Band" after the user typed `<keep>` over it, or showing the saved text again) sends
+        nothing, so the old text would stay. Set the component's local text directly instead.
+        """
+        texts = {self._inputs[name].id: value for name, value in values.items()}
+        self._form.client.run_javascript(
+            f"for (const [id, text] of Object.entries({json.dumps(texts)})) "
+            "{ const input = getElement(id); if (input) input.inputValue = text; }"
+        )
+
+    def mark_state(self, dirty_fields: set[str], mixed_fields: frozenset[str]) -> None:
+        """Highlight fields with unsaved changes and grey out fields that differ between files."""
         for name, input_ in self._inputs.items():
-            if name in dirty_fields:
-                input_.props(DIRTY_PROPS)
-            else:
-                input_.props(remove="bg-color")
+            _toggle_prop(input_, "bg-color=amber-1", name in dirty_fields)
+            _toggle_prop(input_, "input-class=text-grey-7", name in mixed_fields)
 
     def set_enabled(self, enabled: bool) -> None:
         for input_ in self._inputs.values():

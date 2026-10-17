@@ -58,7 +58,7 @@ tests/
 - [x] 1. **Foundation:** package layout, config, `__main__`, pytest and ruff setup, dependencies (nicegui, mutagen, httpx).
 - [x] 2. **Read path:** `Track`/`TagSet` models, ID3 reader, folder scan, file grid with sortable and selectable columns, folder browser dialog.
 - [x] 3. **Edit and save:** tag panel for a single track, edit buffer, dirty indicators, save, ID3 v2.3/v2.4 and v1 handling.
-- [ ] 4. **Multi-select:** merged view with `<keep>`, batch apply.
+- [x] 4. **Multi-select:** merged view with `<keep>`, batch apply.
 - [ ] 5. **Cover art:** view, add, replace, extract, remove.
 - [ ] 6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview), tag to tag, auto-numbering.
 - [ ] 7. **Transforms:** case conversion, find/replace with regex.
