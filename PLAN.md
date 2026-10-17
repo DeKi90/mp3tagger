@@ -55,16 +55,16 @@ tests/
 
 ## Phases
 
-1. **Foundation:** package layout, config, `__main__`, pytest and ruff setup, dependencies (nicegui, mutagen, httpx).
-2. **Read path:** `Track`/`TagSet` models, ID3 reader, folder scan, file grid with sortable and selectable columns, folder browser dialog.
-3. **Edit and save:** tag panel for a single track, edit buffer, dirty indicators, save, ID3 v2.3/v2.4 and v1 handling.
-4. **Multi-select:** merged view with `<keep>`, batch apply.
-5. **Cover art:** view, add, replace, extract, remove.
-6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview), tag to tag, auto-numbering.
-7. **Transforms:** case conversion, find/replace with regex.
-8. **Online lookup:** MusicBrainz import with preview and field mapping (Discogs deferred).
-9. **Docker:** Dockerfile, root sandbox hardening, env config, docs.
-10. **Optional features:** undo polish, filter/search, actions, export, technical info, playlists.
+- [x] 1. **Foundation:** package layout, config, `__main__`, pytest and ruff setup, dependencies (nicegui, mutagen, httpx).
+- [ ] 2. **Read path:** `Track`/`TagSet` models, ID3 reader, folder scan, file grid with sortable and selectable columns, folder browser dialog.
+- [ ] 3. **Edit and save:** tag panel for a single track, edit buffer, dirty indicators, save, ID3 v2.3/v2.4 and v1 handling.
+- [ ] 4. **Multi-select:** merged view with `<keep>`, batch apply.
+- [ ] 5. **Cover art:** view, add, replace, extract, remove.
+- [ ] 6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview), tag to tag, auto-numbering.
+- [ ] 7. **Transforms:** case conversion, find/replace with regex.
+- [ ] 8. **Online lookup:** MusicBrainz import with preview and field mapping (Discogs deferred).
+- [ ] 9. **Docker:** Dockerfile, root sandbox hardening, env config, docs.
+- [ ] 10. **Optional features:** undo polish, filter/search, actions, export, technical info, playlists.
 
 Technical file info (bitrate, duration) is cheap with mutagen, so it can move up to phase 2.
 
