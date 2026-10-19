@@ -1,41 +1,25 @@
 """The converters (Filename -> Tag, Tag -> Filename, Tag -> Tag, auto-number) in the page."""
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from mutagen.id3 import ID3
 from nicegui import ui
 from nicegui.testing import User
-from nicegui.testing.user_interaction import UserInteraction
 
 from mp3tagger.core.tagio.id3 import Id3Reader
 from mp3tagger.ui.file_grid import FileGrid
 from uihelpers import (
     button,
+    choose,
     click,
     grid_rows,
     open_folder,
     row_for,
     select,
+    table_rows,
     type_into,
 )
-
-
-async def choose(user: User, item: str) -> None:
-    """Pick an entry of the Convert menu and let its dialog open."""
-    (menu_item,) = (
-        e
-        for e in user.client.elements.values()
-        if isinstance(e, ui.menu_item) and next(iter(e)).text == item  # its label is a child
-    )
-    UserInteraction(user, {menu_item}, item).click()
-    await asyncio.sleep(0.1)
-
-
-def table_rows(user: User) -> list[dict]:
-    (table,) = (e for e in user.client.elements.values() if isinstance(e, ui.table))
-    return [{k: v for k, v in row.items() if k != "id"} for row in table.rows]
 
 
 def convert_button(user: User) -> ui.button:

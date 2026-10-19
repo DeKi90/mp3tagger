@@ -94,3 +94,36 @@ async def click(user: User, text: str) -> None:
 
 def row_for(user: User, path: Path) -> dict:
     return next(r for r in grid_rows(user) if r["id"] == str(path))
+
+
+async def choose(user: User, item: str) -> None:
+    """Pick an entry of the Convert menu and let its dialog open."""
+    (menu_item,) = (
+        e
+        for e in user.client.elements.values()
+        if isinstance(e, ui.menu_item) and next(iter(e)).text == item  # its label is a child
+    )
+    UserInteraction(user, {menu_item}, item).click()
+    await asyncio.sleep(0.1)
+
+
+def table_rows(user: User) -> list[dict]:
+    (table,) = (e for e in user.client.elements.values() if isinstance(e, ui.table))
+    return [{k: v for k, v in row.items() if k != "id"} for row in table.rows]
+
+
+def select_named(user: User, label: str) -> ui.select:
+    """The (single) select with this label, e.g. a dialog's "Style"."""
+    (element,) = (
+        e
+        for e in user.client.elements.values()
+        if isinstance(e, ui.select) and e.props.get("label") == label
+    )
+    return element
+
+
+def checkbox_named(user: User, text: str) -> ui.checkbox:
+    (element,) = (
+        e for e in user.client.elements.values() if isinstance(e, ui.checkbox) and text in e.text
+    )
+    return element

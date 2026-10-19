@@ -16,7 +16,7 @@ from mp3tagger.core.saving import find_folder_cover_conflicts, write_changes
 from mp3tagger.core.tagio.base import SaveOptions
 from mp3tagger.core.tagio.id3 import Id3Reader, Id3Writer
 from mp3tagger.services.fs import PathOutsideRootsError, Sandbox
-from mp3tagger.ui.dialogs import converters
+from mp3tagger.ui.dialogs import converters, transforms
 from mp3tagger.ui.dialogs.confirm import confirm
 from mp3tagger.ui.dialogs.folder_browser import pick_folder
 from mp3tagger.ui.file_grid import COLUMN_LABELS, DEFAULT_VISIBLE, FileGrid, track_row
@@ -87,6 +87,9 @@ def build_app(config: Config) -> None:
                 ui.menu_item("Tag → Filename…", on_click=lambda: convert_tag_to_filename())
                 ui.menu_item("Tag → Tag…", on_click=lambda: convert_tag_to_tag())
                 ui.menu_item("Auto-number tracks…", on_click=lambda: convert_auto_number())
+                ui.separator()
+                ui.menu_item("Change case…", on_click=lambda: convert_case())
+                ui.menu_item("Find and replace…", on_click=lambda: convert_find_replace())
             ui.space()
             version_select = (
                 ui.select(VERSION_CHOICES, value="keep", label="Save as")
@@ -281,6 +284,16 @@ def build_app(config: Config) -> None:
             changes = await converters.tag_to_tag(tags_of(editable_paths()))
             if changes:
                 after_bulk_edit(buffer.set_fields(changes), "Tag → Tag")
+
+        async def convert_case() -> None:
+            changes = await transforms.change_case(tags_of(editable_paths()))
+            if changes:
+                after_bulk_edit(buffer.set_fields(changes), "Change case")
+
+        async def convert_find_replace() -> None:
+            changes = await transforms.find_replace(tags_of(editable_paths()))
+            if changes:
+                after_bulk_edit(buffer.set_fields(changes), "Find and replace")
 
         async def convert_auto_number() -> None:
             wanted = set(editable_paths())

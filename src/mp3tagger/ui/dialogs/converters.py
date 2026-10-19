@@ -6,7 +6,7 @@ from pathlib import Path
 
 from nicegui import ui
 
-from mp3tagger.core.models import FIELD_NAMES, TagSet
+from mp3tagger.core.models import TagSet
 from mp3tagger.core.numbering import number_tracks
 from mp3tagger.core.patterns import (
     PatternError,
@@ -15,68 +15,16 @@ from mp3tagger.core.patterns import (
     parse_path,
 )
 from mp3tagger.core.rename import RenamePlan, plan_renames
-
-MAX_PREVIEW_ROWS = 500  # the preview is a sample for checking the pattern, not a full listing
-
-FIELD_LABELS = {
-    "title": "Title",
-    "artist": "Artist",
-    "album": "Album",
-    "album_artist": "Album artist",
-    "year": "Year",
-    "track": "Track",
-    "disc": "Disc",
-    "genre": "Genre",
-    "comment": "Comment",
-    "composer": "Composer",
-}
-assert set(FIELD_LABELS) == set(FIELD_NAMES)
-
-PATTERN_HELP = (
-    "Fields: " + ", ".join(f"%{name}%" for name in FIELD_NAMES) + ". "
-    "%track:2% pads with zeros (03). %albumartist% also works."
+from mp3tagger.ui.dialogs.parts import (
+    FIELD_LABELS,
+    column,
+    footer,
+    note,
+    pattern_input,
+    preview_table,
+    run_dialog,
+    show_rows,
 )
-
-
-def _column(name: str, label: str) -> dict:
-    return {"name": name, "label": label, "field": name, "align": "left"}
-
-
-def _preview_table() -> ui.table:
-    table = ui.table(columns=[], rows=[], row_key="id", pagination=0)
-    table.props("dense flat bordered virtual-scroll hide-bottom").classes("w-full")
-    table.style("max-height: 22rem")
-    return table
-
-
-def _show(table: ui.table, columns: list[dict], rows: Sequence[dict]) -> None:
-    table.columns = columns
-    table.rows = [{"id": i, **row} for i, row in enumerate(rows[:MAX_PREVIEW_ROWS])]
-    table.update()
-
-
-def _note(total: int) -> str:
-    return f" (preview shows the first {MAX_PREVIEW_ROWS})" if total > MAX_PREVIEW_ROWS else ""
-
-
-async def _run(dialog: ui.dialog) -> object:
-    result = await dialog
-    dialog.delete()
-    return result
-
-
-def _footer(dialog: ui.dialog, apply_label: str) -> ui.button:
-    """Cancel and apply buttons; returns the apply button. The caller submits via `submit`."""
-    with ui.row().classes("w-full justify-end"):
-        ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
-        return ui.button(apply_label).props("unelevated")
-
-
-def _pattern_input(default: str) -> ui.input:
-    field = ui.input("Pattern", value=default).props("outlined dense autofocus clearable")
-    field.classes("w-full")
-    ui.label(PATTERN_HELP).classes("text-caption text-grey")
-    return field
 
 
 async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | None:
@@ -84,15 +32,15 @@ async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] |
     result: dict[Path, dict[str, str]] = {}
     with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
         ui.label("Filename → Tag").classes("text-h6")
-        pattern = _pattern_input("%artist% - %title%")
+        pattern = pattern_input("%artist% - %title%")
         ui.label(
             "Use / to read folder names too, e.g. %artist%/%album%/%track% - %title%. "
             "%ignore% skips a part."
         ).classes("text-caption text-grey")
         error = ui.label().classes("text-negative")
         summary = ui.label().classes("text-caption")
-        table = _preview_table()
-        apply = _footer(dialog, "Apply")
+        table = preview_table()
+        apply = footer(dialog, "Apply")
 
     def refresh() -> None:
         result.clear()
@@ -100,14 +48,14 @@ async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] |
             compiled = compile_parse_pattern(pattern.value or "")
         except PatternError as exc:
             error.text, summary.text = str(exc), ""
-            _show(table, [], [])
+            show_rows(table, [], [])
             apply.set_enabled(False)
             return
         error.text = ""
         parsed = [(path, parse_path(compiled, path)) for path in paths]
         result.update({path: values for path, values in parsed if values is not None})
-        columns = [_column("file", "File"), *(_column(f, FIELD_LABELS[f]) for f in compiled.fields)]
-        columns.append(_column("match", ""))
+        columns = [column("file", "File"), *(column(f, FIELD_LABELS[f]) for f in compiled.fields)]
+        columns.append(column("match", ""))
         rows = [
             {
                 "file": path.name,
@@ -116,15 +64,15 @@ async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] |
             }
             for path, values in parsed
         ]
-        _show(table, columns, rows)
-        summary.text = f"{len(result)} of {len(paths)} files match{_note(len(rows))}"
+        show_rows(table, columns, rows)
+        summary.text = f"{len(result)} of {len(paths)} files match{note(len(rows))}"
         apply.set_enabled(bool(result))
         apply.text = f"Apply to {len(result)} file(s)"
 
     pattern.on_value_change(refresh)
     apply.on_click(lambda: dialog.submit(dict(result)))
     refresh()
-    return await _run(dialog)  # type: ignore[return-value]
+    return await run_dialog(dialog)  # type: ignore[return-value]
 
 
 async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePlan] | None:
@@ -132,15 +80,15 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
     plans: list[RenamePlan] = []
     with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
         ui.label("Tag → Filename").classes("text-h6")
-        pattern = _pattern_input("%track:2% - %title%")
+        pattern = pattern_input("%track:2% - %title%")
         ui.label(
             "The extension is kept and files stay in their folder. Illegal characters in tag "
             "values are replaced by _. Files are renamed on disk as soon as you apply."
         ).classes("text-caption text-grey")
         error = ui.label().classes("text-negative")
         summary = ui.label().classes("text-caption")
-        table = _preview_table()
-        apply = _footer(dialog, "Rename")
+        table = preview_table()
+        apply = footer(dialog, "Rename")
 
     def refresh() -> None:
         plans.clear()
@@ -148,22 +96,22 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
             plans.extend(plan_renames(items, pattern.value or ""))
         except PatternError as exc:
             error.text, summary.text = str(exc), ""
-            _show(table, [], [])
+            show_rows(table, [], [])
             apply.set_enabled(False)
             return
         error.text = ""
-        columns = [_column("old", "Current name"), _column("new", "New name"), _column("note", "")]
+        columns = [column("old", "Current name"), column("new", "New name"), column("note", "")]
         rows = []
         for plan in plans:
-            note = {"unchanged": "unchanged", "rename": plan.message, "error": plan.message}
+            labels = {"unchanged": "unchanged", "rename": plan.message, "error": plan.message}
             rows.append(
                 {
                     "old": plan.source.name,
                     "new": plan.target.name if plan.target else "—",
-                    "note": ("⚠ " if plan.status == "error" else "") + note[plan.status],
+                    "note": ("⚠ " if plan.status == "error" else "") + labels[plan.status],
                 }
             )
-        _show(table, columns, rows)
+        show_rows(table, columns, rows)
         count = {
             s: sum(1 for p in plans if p.status == s) for s in ("rename", "unchanged", "error")
         }
@@ -171,7 +119,7 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
         warning = f" · {incomplete} with an empty field" if incomplete else ""
         summary.text = (
             f"{count['rename']} to rename, {count['unchanged']} unchanged, "
-            f"{count['error']} with problems (skipped){warning}{_note(len(rows))}"
+            f"{count['error']} with problems (skipped){warning}{note(len(rows))}"
         )
         apply.set_enabled(count["rename"] > 0)
         apply.text = f"Rename {count['rename']} file(s)"
@@ -179,7 +127,7 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
     pattern.on_value_change(refresh)
     apply.on_click(lambda: dialog.submit(list(plans)))
     refresh()
-    return await _run(dialog)  # type: ignore[return-value]
+    return await run_dialog(dialog)  # type: ignore[return-value]
 
 
 async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[str, str]] | None:
@@ -189,11 +137,11 @@ async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[st
         ui.label("Tag → Tag").classes("text-h6")
         target = ui.select(FIELD_LABELS, value="album_artist", label="Set field")
         target.props("outlined dense").classes("w-64")
-        pattern = _pattern_input("%artist%")
+        pattern = pattern_input("%artist%")
         error = ui.label().classes("text-negative")
         summary = ui.label().classes("text-caption")
-        table = _preview_table()
-        apply = _footer(dialog, "Apply")
+        table = preview_table()
+        apply = footer(dialog, "Apply")
 
     def refresh() -> None:
         result.clear()
@@ -202,7 +150,7 @@ async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[st
             formatted = format_values(items, pattern.value or "")
         except PatternError as exc:
             error.text, summary.text = str(exc), ""
-            _show(table, [], [])
+            show_rows(table, [], [])
             apply.set_enabled(False)
             return
         error.text = ""
@@ -214,21 +162,21 @@ async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[st
             result[path] = {field: new.text}
             rows.append({"file": path.name, "current": current, "new": new.text})
         columns = [
-            _column("file", "File"),
-            _column("current", f"{FIELD_LABELS[field]} now"),
-            _column("new", f"{FIELD_LABELS[field]} new"),
+            column("file", "File"),
+            column("current", f"{FIELD_LABELS[field]} now"),
+            column("new", f"{FIELD_LABELS[field]} new"),
         ]
-        _show(table, columns, rows)
+        show_rows(table, columns, rows)
         empty = sum(1 for _, f in formatted if f.empty_fields)
         warning = f" · {empty} with an empty field" if empty else ""
-        summary.text = f"{changed} of {len(items)} files change{warning}{_note(len(rows))}"
+        summary.text = f"{changed} of {len(items)} files change{warning}{note(len(rows))}"
         apply.set_enabled(changed > 0)
 
     pattern.on_value_change(refresh)
     target.on_value_change(refresh)
     apply.on_click(lambda: dialog.submit(dict(result)))
     refresh()
-    return await _run(dialog)  # type: ignore[return-value]
+    return await run_dialog(dialog)  # type: ignore[return-value]
 
 
 async def auto_number(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | None:
@@ -248,8 +196,8 @@ async def auto_number(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | Non
         restart = ui.checkbox("Start again in every folder", value=True)
         total = ui.checkbox("Also write the total (3/12)", value=False)
         summary = ui.label().classes("text-caption")
-        table = _preview_table()
-        apply = _footer(dialog, "Apply")
+        table = preview_table()
+        apply = footer(dialog, "Apply")
 
     def refresh() -> None:
         numbers = number_tracks(
@@ -262,12 +210,12 @@ async def auto_number(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | Non
         result.clear()
         result.update({path: {"track": value} for path, value in numbers.items()})
         rows = [{"file": p.name, "folder": p.parent.name, "track": numbers[p]} for p in paths]
-        columns = [_column("file", "File"), _column("folder", "Folder"), _column("track", "Track")]
-        _show(table, columns, rows)
-        summary.text = f"{len(paths)} files{_note(len(rows))}"
+        columns = [column("file", "File"), column("folder", "Folder"), column("track", "Track")]
+        show_rows(table, columns, rows)
+        summary.text = f"{len(paths)} files{note(len(rows))}"
 
     for control in (start, width, restart, total):
         control.on_value_change(refresh)
     apply.on_click(lambda: dialog.submit(dict(result)))
     refresh()
-    return await _run(dialog)  # type: ignore[return-value]
+    return await run_dialog(dialog)  # type: ignore[return-value]
