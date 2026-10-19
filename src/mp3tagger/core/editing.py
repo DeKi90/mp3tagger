@@ -1,6 +1,6 @@
 """Pending-changes buffer: edits live here until saved, so undo never touches disk."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -90,14 +90,41 @@ class EditBuffer:
             self._push_snapshot(changed)
             self._open_edit = key
         for path in changed:
-            pending = self._pending.setdefault(path, {})
-            if value == getattr(self._tracks[path].tags, field):
-                pending.pop(field, None)  # edited back to the original: no longer a change
-            else:
-                pending[field] = value
-            if not pending:
-                del self._pending[path]
+            self._assign(path, field, value)
         return changed
+
+    def set_fields(self, changes: Mapping[Path, Mapping[str, str]]) -> list[Path]:
+        """Set several fields on several tracks as ONE undo step (e.g. a converter's result).
+
+        Returns the paths where something changed.
+        """
+        for fields in changes.values():
+            for field in fields:
+                if field not in FIELD_NAMES:
+                    raise KeyError(f"Unknown tag field: {field}")
+        effective = {p: self.effective_tags(p) for p in changes}
+        wanted = {
+            p: {f: v for f, v in fields.items() if getattr(effective[p], f) != v}
+            for p, fields in changes.items()
+        }
+        wanted = {p: fields for p, fields in wanted.items() if fields}
+        if not wanted:
+            return []
+        self._push_snapshot(list(wanted))
+        self._open_edit = None
+        for path, fields in wanted.items():
+            for field, value in fields.items():
+                self._assign(path, field, value)
+        return list(wanted)
+
+    def _assign(self, path: Path, field: str, value: str) -> None:
+        pending = self._pending.setdefault(path, {})
+        if value == getattr(self._tracks[path].tags, field):
+            pending.pop(field, None)  # edited back to the original: no longer a change
+        else:
+            pending[field] = value
+        if not pending:
+            del self._pending[path]
 
     def set_cover(self, paths: Iterable[Path], cover: CoverChange) -> list[Path]:
         """Replace (CoverArt), remove (None) or move out of the file (MoveCoverToFolder) the cover.
@@ -170,6 +197,21 @@ class EditBuffer:
             self._pending.pop(track.path, None)
             self._covers.pop(track.path, None)
         self._reset_history()
+
+    def rename_paths(self, mapping: Mapping[Path, Path]) -> None:
+        """Follow files that were renamed on disk: tracks, pending edits and undo history keep
+        working under the new paths, and the order of the tracks is unchanged."""
+
+        def new(path: Path) -> Path:
+            return mapping.get(path, path)
+
+        self._tracks = {new(p): replace(t, path=new(p)) for p, t in self._tracks.items()}
+        self._pending = {new(p): v for p, v in self._pending.items()}
+        self._covers = {new(p): v for p, v in self._covers.items()}
+        self._undo = [{new(p): snap for p, snap in step.items()} for step in self._undo]
+        if self._open_edit is not None:
+            paths, field = self._open_edit
+            self._open_edit = (frozenset(new(p) for p in paths), field)
 
     def _reset_history(self) -> None:
         self._undo.clear()

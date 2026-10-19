@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from mp3tagger.core.editing import EditBuffer
-from mp3tagger.core.models import TagSet, Track
+from mp3tagger.core.models import UNCHANGED, TagSet, Track
 
 A, B = Path("/m/a.mp3"), Path("/m/b.mp3")
 
@@ -124,3 +124,65 @@ def test_undo_open_edit_after_edit_was_broken_does_nothing(buf):
     buf.break_edit()
     assert buf.undo_open_edit("title") == []
     assert buf.is_dirty(A)
+
+
+# --- converters: batch edits and renames -----------------------------------------------------
+
+
+def test_set_fields_is_one_undo_step_for_many_tracks_and_fields(buf):
+    assert buf.set_fields({A: {"title": "T1", "artist": "Y"}, B: {"title": "T2"}}) == [A, B]
+    assert buf.pending(A) == {"title": "T1", "artist": "Y"} and buf.pending(B) == {"title": "T2"}
+    assert set(buf.undo()) == {A, B}
+    assert buf.dirty_paths() == [] and not buf.can_undo
+
+
+def test_set_fields_skips_unchanged_values_and_tracks(buf):
+    assert buf.set_fields({A: {"title": "Alpha"}, B: {"title": "New"}}) == [B]
+    assert buf.dirty_paths() == [B]
+    assert buf.set_fields({B: {"title": "New"}}) == []  # nothing to do: no undo step either
+    assert buf.undo() == [B] and not buf.can_undo
+
+
+def test_set_fields_rejects_unknown_fields_without_changing_anything(buf):
+    with pytest.raises(KeyError):
+        buf.set_fields({A: {"title": "x"}, B: {"bogus": "y"}})
+    assert buf.dirty_paths() == []
+
+
+def test_set_fields_does_not_coalesce_with_typing(buf):
+    buf.set_field([A], "title", "T")
+    buf.set_fields({A: {"title": "Converted"}})
+    buf.undo()
+    assert buf.pending(A) == {"title": "T"}
+
+
+def test_rename_paths_moves_everything_with_the_file(buf):
+    from mp3tagger.core.models import CoverArt
+
+    cover = CoverArt(b"x", "image/png")
+    buf.set_field([A], "title", "Edited")
+    buf.set_cover([B], cover)
+    new_a, new_b = Path("/m/renamed-a.mp3"), Path("/m/b2.mp3")
+    buf.rename_paths({A: new_a, B: new_b})
+    assert buf.paths == [new_a, new_b]  # order is kept
+    assert buf.track(new_a).path == new_a and buf.track(new_a).filename == "renamed-a.mp3"
+    assert buf.pending(new_a) == {"title": "Edited"} and buf.pending_cover(new_b) == cover
+    assert buf.dirty_paths() == [new_a, new_b]
+    buf.undo()  # the undo history follows the files too
+    assert buf.pending_cover(new_b) is UNCHANGED and buf.pending(new_a) == {"title": "Edited"}
+    buf.undo()
+    assert buf.dirty_paths() == []
+
+
+def test_rename_paths_keeps_typing_coalesced(buf):
+    buf.set_field([A], "title", "T")
+    new_a = Path("/m/x.mp3")
+    buf.rename_paths({A: new_a})
+    buf.set_field([new_a], "title", "Ti")  # still the same edit in progress
+    buf.undo()
+    assert not buf.is_dirty(new_a)
+
+
+def test_rename_paths_ignores_unknown_paths(buf):
+    buf.rename_paths({Path("/elsewhere.mp3"): Path("/x.mp3")})
+    assert buf.paths == [A, B]

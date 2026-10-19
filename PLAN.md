@@ -60,7 +60,7 @@ tests/
 - [x] 3. **Edit and save:** tag panel for a single track, edit buffer, dirty indicators, save, ID3 v2.3/v2.4 and v1 handling.
 - [x] 4. **Multi-select:** merged view with `<keep>`, batch apply.
 - [x] 5. **Cover art:** view, add, replace, extract, remove, move to folder (`cover.jpg`/`cover.png`, removes the embedded picture), folder image fallback with embed-from-folder.
-- [ ] 6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview), tag to tag, auto-numbering.
+- [x] 6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview), tag to tag, auto-numbering.
 - [ ] 7. **Transforms:** case conversion, find/replace with regex.
 - [ ] 8. **Online lookup:** MusicBrainz import with preview and field mapping (Discogs deferred).
 - [ ] 9. **Docker:** Dockerfile, root sandbox hardening, env config, docs.

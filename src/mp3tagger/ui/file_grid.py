@@ -1,5 +1,6 @@
 """AG Grid based, sortable, multi-selectable file list."""
 
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,6 +134,19 @@ class FileGrid:
         hidden = [c.field for c in COLUMNS if c.field not in visible]
         self.grid.run_grid_method("setColumnsVisible", shown, True)
         self.grid.run_grid_method("setColumnsVisible", hidden, False)
+
+    async def displayed_paths(self) -> list[Path]:
+        """All files in the order the grid currently shows them (sorting and filtering applied)."""
+        rows = await self.grid.get_client_data(method="filtered_sorted")
+        return [Path(row["id"]) for row in rows]
+
+    def select_paths(self, paths: list[Path]) -> None:
+        """Select exactly these rows (after rows were replaced, which clears the selection)."""
+        ids = json.dumps([str(p) for p in paths])
+        self.grid.client.run_javascript(
+            f"const ids = new Set({ids}); "
+            f"getElement({self.grid.id}).api.forEachNode((n) => n.setSelected(ids.has(n.id)));"
+        )
 
     async def selected_paths(self) -> list[Path]:
         return [Path(row["id"]) for row in await self.grid.get_selected_rows()]

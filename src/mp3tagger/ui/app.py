@@ -10,11 +10,13 @@ from mp3tagger.core.editing import EditBuffer
 from mp3tagger.core.folder_cover import FolderCover, load_folder_covers
 from mp3tagger.core.images import EXTENSIONS, FOLDER_COVER_NAMES, sniff_image
 from mp3tagger.core.library import load_covers, scan_folder
-from mp3tagger.core.models import UNCHANGED, CoverArt, MoveCoverToFolder
+from mp3tagger.core.models import UNCHANGED, CoverArt, MoveCoverToFolder, TagSet
+from mp3tagger.core.rename import RenameError, apply_renames
 from mp3tagger.core.saving import find_folder_cover_conflicts, write_changes
 from mp3tagger.core.tagio.base import SaveOptions
 from mp3tagger.core.tagio.id3 import Id3Reader, Id3Writer
 from mp3tagger.services.fs import PathOutsideRootsError, Sandbox
+from mp3tagger.ui.dialogs import converters
 from mp3tagger.ui.dialogs.confirm import confirm
 from mp3tagger.ui.dialogs.folder_browser import pick_folder
 from mp3tagger.ui.file_grid import COLUMN_LABELS, DEFAULT_VISIBLE, FileGrid, track_row
@@ -79,6 +81,12 @@ def build_app(config: Config) -> None:
             undo_button.props("outline")
             revert_button = ui.button("Revert all", icon="restore", on_click=lambda: revert())
             revert_button.props("outline")
+            convert_button = ui.button("Convert", icon="transform").props("outline")
+            with convert_button, ui.menu():
+                ui.menu_item("Filename → Tag…", on_click=lambda: convert_filename_to_tag())
+                ui.menu_item("Tag → Filename…", on_click=lambda: convert_tag_to_filename())
+                ui.menu_item("Tag → Tag…", on_click=lambda: convert_tag_to_tag())
+                ui.menu_item("Auto-number tracks…", on_click=lambda: convert_auto_number())
             ui.space()
             version_select = (
                 ui.select(VERSION_CHOICES, value="keep", label="Save as")
@@ -86,7 +94,7 @@ def build_app(config: Config) -> None:
                 .classes("min-w-48")
             )
             write_v1 = ui.checkbox("Also write ID3v1")
-        controls = [open_button, save_button, undo_button, revert_button]
+        controls = [open_button, save_button, undo_button, revert_button, convert_button]
 
         # --- grid + tag panel -------------------------------------------------------------
         with ui.splitter(value=70).classes("w-full flex-grow min-h-0") as splitter:
@@ -210,6 +218,7 @@ def build_app(config: Config) -> None:
             save_button.set_enabled(bool(dirty))
             revert_button.set_enabled(bool(dirty))
             undo_button.set_enabled(buffer.can_undo)
+            convert_button.set_enabled(bool(editable_paths()))
             if bool(dirty) != unload_guard_active:  # warn before closing the tab with unsaved edits
                 unload_guard_active = bool(dirty)
                 handler = "(e) => { e.preventDefault(); e.returnValue = ''; }"
@@ -251,6 +260,65 @@ def build_app(config: Config) -> None:
             refresh_panel()
             refresh_status()
             await refresh_cover()
+
+        # --- converters -------------------------------------------------------------------
+        def tags_of(paths: list[Path]) -> list[tuple[Path, TagSet]]:
+            return [(p, buffer.effective_tags(p)) for p in paths]
+
+        def after_bulk_edit(changed: list[Path], what: str) -> None:
+            refresh_rows(changed)
+            refresh_panel()
+            refresh_status()
+            if changed:
+                ui.notify(f"{what}: {len(changed)} file(s) modified. Save to write them.")
+
+        async def convert_filename_to_tag() -> None:
+            changes = await converters.filename_to_tag(editable_paths())
+            if changes:
+                after_bulk_edit(buffer.set_fields(changes), "Filename → Tag")
+
+        async def convert_tag_to_tag() -> None:
+            changes = await converters.tag_to_tag(tags_of(editable_paths()))
+            if changes:
+                after_bulk_edit(buffer.set_fields(changes), "Tag → Tag")
+
+        async def convert_auto_number() -> None:
+            wanted = set(editable_paths())
+            shown = await grid.displayed_paths()  # sorted/filtered the way the user sees it
+            ordered = [p for p in shown if p in wanted] or editable_paths()
+            changes = await converters.auto_number(ordered)
+            if changes:
+                after_bulk_edit(buffer.set_fields(changes), "Auto-number")
+
+        async def convert_tag_to_filename() -> None:
+            plans = await converters.tag_to_filename(tags_of(editable_paths()))
+            if plans is None:
+                return
+            set_busy(True)  # the paths change under the buffer; nothing may be edited meanwhile
+            try:
+                mapping = await run.io_bound(apply_renames, plans)
+            except RenameError as exc:
+                ui.notify(str(exc), type="negative", close_button=True)
+                return
+            finally:
+                set_busy(False)
+            follow_renames(mapping)
+            ui.notify(f"Renamed {len(mapping)} file(s)", type="positive")
+
+        def follow_renames(mapping: dict[Path, Path]) -> None:
+            """Make the state follow files that were renamed on disk."""
+            nonlocal selected
+            if not mapping:
+                return
+            buffer.rename_paths(mapping)
+            cached = {mapping.get(p, p): cover for p, cover in covers.items()}
+            covers.clear()
+            covers.update(cached)
+            selected = [mapping.get(p, p) for p in selected]
+            grid.set_rows([row(p) for p in buffer.paths])  # replacing rows clears the selection
+            grid.select_paths(selected)
+            refresh_panel()
+            refresh_status()
 
         # --- cover art --------------------------------------------------------------------
         async def apply_cover(cover: CoverArt | None) -> None:
