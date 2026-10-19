@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from mp3tagger.core.models import Track
+from mp3tagger.core.models import UNCHANGED, CoverArt, CoverChange, Track
 
 
 @dataclass(frozen=True)
@@ -18,14 +18,26 @@ class SaveOptions:
 class TagReader(Protocol):
     extensions: tuple[str, ...]
 
+    def read_cover(self, path: Path) -> CoverArt | None:
+        """The cover picture, or None. Raises MutagenError/OSError if the file is unreadable."""
+        ...
+
     def read(self, path: Path) -> Track:
         """Read a track. Must not raise for unreadable files: return a Track with `error` set."""
         ...
 
 
 class TagWriter(Protocol):
-    def write(self, path: Path, changes: Mapping[str, str], options: SaveOptions) -> None:
+    def write(
+        self,
+        path: Path,
+        changes: Mapping[str, str],
+        options: SaveOptions,
+        cover: CoverChange = UNCHANGED,
+    ) -> None:
         """Apply `changes` (field name -> new value, "" removes the field) in place.
+
+        `cover` replaces (CoverArt) or removes (None) the cover; UNCHANGED leaves it as it is.
 
         Fields not mentioned and frames the model does not know about are preserved.
         Raises MutagenError, OSError or ValueError on failure.

@@ -35,3 +35,14 @@ def test_scan_reports_progress(make_mp3, tmp_path):
     calls = []
     scan_folder(tmp_path, progress=lambda done, total: calls.append((done, total)))
     assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_load_covers_reports_failures_without_stopping(make_mp3, tmp_path):
+    from mp3tagger.core.library import load_covers
+
+    with_cover = make_mp3(tmp_path / "a.mp3", cover="x")
+    without = make_mp3(tmp_path / "b.mp3", title="T")
+    missing = tmp_path / "missing.mp3"
+    covers, errors = load_covers([with_cover, missing, without])
+    assert covers[with_cover] is not None and covers[without] is None
+    assert list(errors) == [missing]

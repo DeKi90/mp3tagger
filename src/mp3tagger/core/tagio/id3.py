@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mutagen import MutagenError
 from mutagen.id3 import (
+    APIC,
     COMM,
     ID3,
     TALB,
@@ -20,10 +21,15 @@ from mutagen.id3 import (
 )
 from mutagen.mp3 import MP3
 
+from mp3tagger.core.images import EXTENSIONS
 from mp3tagger.core.models import (
     FIELD_NAMES,
+    UNCHANGED,
     YEAR_FORMATS,
     AudioInfo,
+    CoverArt,
+    CoverChange,
+    MoveCoverToFolder,
     TagSet,
     Track,
     is_valid_year,
@@ -48,6 +54,15 @@ def _main_comment(tags: ID3) -> COMM | None:
     """
     frames = tags.getall("COMM")
     return next((f for f in frames if not f.desc), frames[0] if frames else None)
+
+
+FRONT_COVER = 3  # APIC picture type
+
+
+def _main_picture(tags: ID3) -> APIC | None:
+    """The picture shown as cover: the front cover if there is one, else the first picture."""
+    frames = tags.getall("APIC")
+    return next((f for f in frames if f.type == FRONT_COVER), frames[0] if frames else None)
 
 
 def _comment(tags: ID3) -> str:
@@ -80,6 +95,15 @@ def _tagset(tags: ID3) -> TagSet:
 
 class Id3Reader:
     extensions = (".mp3",)
+
+    def read_cover(self, path: Path) -> CoverArt | None:
+        """The cover picture of a file, or None. Raises MutagenError/OSError if unreadable."""
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            return None
+        picture = _main_picture(tags)
+        return CoverArt(bytes(picture.data), picture.mime) if picture else None
 
     def read(self, path: Path) -> Track:
         try:
@@ -150,8 +174,30 @@ def _set_comment(tags: ID3, value: str) -> None:
         del tags[frame.HashKey]
 
 
+def _set_cover(tags: ID3, cover: CoverArt | None) -> None:
+    """Replace or remove the displayed picture. Other embedded pictures are left alone."""
+    if cover is not None and cover.mime not in EXTENSIONS:
+        raise ValueError(f"Unsupported cover image type {cover.mime!r}")
+    old = _main_picture(tags)
+    if old is not None:
+        del tags[old.HashKey]
+    if cover is not None:
+        # APIC frames are keyed by description: pick one that does not replace another picture.
+        taken = {f.desc for f in tags.getall("APIC")}
+        desc = next(d for d in ("", *(f"cover{i}" for i in range(1, 100))) if d not in taken)
+        tags.add(
+            APIC(encoding=_UTF8, mime=cover.mime, type=FRONT_COVER, desc=desc, data=cover.data)
+        )
+
+
 class Id3Writer:
-    def write(self, path: Path, changes: Mapping[str, str], options: SaveOptions) -> None:
+    def write(
+        self,
+        path: Path,
+        changes: Mapping[str, str],
+        options: SaveOptions,
+        cover: CoverChange = UNCHANGED,
+    ) -> None:
         unknown = set(changes) - set(FIELD_NAMES)
         if unknown:
             raise ValueError(f"Unknown tag fields: {', '.join(sorted(unknown))}")
@@ -172,6 +218,11 @@ class Id3Writer:
                 _set_comment(tags, value)
             else:
                 _set_text(tags, _TEXT_FRAMES[field], value)
+
+        if isinstance(cover, MoveCoverToFolder):
+            raise ValueError("Moving a cover to a file is resolved before writing tags")
+        if cover is not UNCHANGED:
+            _set_cover(tags, cover)
 
         # v1=2 creates an ID3v1 tag, v1=1 only updates one that already exists.
         tags.save(path, v1=2 if options.write_v1 else 1, v2_version=version)

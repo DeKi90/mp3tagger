@@ -1,6 +1,7 @@
 """Format-agnostic data model for tracks and their tags."""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
@@ -58,3 +59,37 @@ class Track:
     @property
     def filename(self) -> str:
         return self.path.name
+
+
+@dataclass(frozen=True)
+class CoverArt:
+    data: bytes
+    mime: str  # "image/jpeg" or "image/png"
+
+
+class _Unchanged:
+    def __repr__(self) -> str:
+        return "UNCHANGED"
+
+
+UNCHANGED = _Unchanged()
+
+
+@dataclass(frozen=True)
+class MoveCoverToFolder:
+    """Write `cover` as `filename` next to the audio file and remove the embedded picture."""
+
+    cover: CoverArt
+    filename: str
+
+
+# CoverArt replaces the embedded cover, None removes it, UNCHANGED leaves it alone.
+CoverChange = CoverArt | None | _Unchanged | MoveCoverToFolder
+
+
+@dataclass(frozen=True)
+class Edit:
+    """Everything to write to one file: changed fields and/or a cover change."""
+
+    fields: Mapping[str, str] = field(default_factory=dict)
+    cover: CoverChange = UNCHANGED

@@ -43,6 +43,7 @@ COLUMNS: tuple[Column, ...] = (
     Column("bitrate", "Bitrate", default_visible=False, width=100, formatter=BITRATE_FORMATTER),
     Column("sample_rate", "Sample rate", default_visible=False, width=110, formatter=HZ_FORMATTER),
     Column("tag_version", "Tag", default_visible=False, width=100),
+    Column("cover", "Cover", default_visible=False, width=80),
     Column("path", "Path", default_visible=False, width=300),
     Column("error", "Error", default_visible=False),
 )
@@ -53,7 +54,12 @@ DEFAULT_VISIBLE: list[str] = [c.field for c in COLUMNS if c.default_visible]
 SelectionHandler = Callable[[list[Path]], Awaitable[None] | None]
 
 
-def track_row(track: Track, tags: TagSet | None = None, dirty: bool = False) -> dict:
+def track_row(
+    track: Track,
+    tags: TagSet | None = None,
+    dirty: bool = False,
+    has_cover: bool | None = None,
+) -> dict:
     """Grid row for a track. `tags` are the effective tags (original plus pending edits)."""
     return {
         "id": str(track.path),
@@ -64,6 +70,7 @@ def track_row(track: Track, tags: TagSet | None = None, dirty: bool = False) -> 
         "bitrate": track.info.bitrate or None,
         "sample_rate": track.info.sample_rate or None,
         "tag_version": track.tag_version,
+        "cover": "✓" if (track.has_cover if has_cover is None else has_cover) else "",
         "path": str(track.path.parent),
         "error": track.error or "",
     }

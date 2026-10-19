@@ -5,10 +5,13 @@ from pathlib import Path
 from nicegui import events, run, ui
 
 from mp3tagger.config import Config
-from mp3tagger.core.batch import KEEP, merge_tags
+from mp3tagger.core.batch import KEEP, ShownCover, merge_covers, merge_tags
 from mp3tagger.core.editing import EditBuffer
-from mp3tagger.core.library import scan_folder
-from mp3tagger.core.saving import write_changes
+from mp3tagger.core.folder_cover import FolderCover, load_folder_covers
+from mp3tagger.core.images import EXTENSIONS, FOLDER_COVER_NAMES, sniff_image
+from mp3tagger.core.library import load_covers, scan_folder
+from mp3tagger.core.models import UNCHANGED, CoverArt, MoveCoverToFolder
+from mp3tagger.core.saving import find_folder_cover_conflicts, write_changes
 from mp3tagger.core.tagio.base import SaveOptions
 from mp3tagger.core.tagio.id3 import Id3Reader, Id3Writer
 from mp3tagger.services.fs import PathOutsideRootsError, Sandbox
@@ -16,6 +19,9 @@ from mp3tagger.ui.dialogs.confirm import confirm
 from mp3tagger.ui.dialogs.folder_browser import pick_folder
 from mp3tagger.ui.file_grid import COLUMN_LABELS, DEFAULT_VISIBLE, FileGrid, track_row
 from mp3tagger.ui.tag_panel import TagPanel, format_info
+
+# Above this many selected files the cover is not loaded for display (it would read every file).
+MAX_COVER_PREVIEW = 200
 
 VERSION_CHOICES = {"keep": "Keep ID3v2 version", 3: "ID3v2.3", 4: "ID3v2.4"}
 
@@ -40,6 +46,10 @@ def build_app(config: Config) -> None:
         folder: Path | None = None
         selected: list[Path] = []
         unload_guard_active = False
+        covers: dict[Path, CoverArt | None] = {}  # covers as on disk, loaded on demand
+        folder_covers: dict[Path, FolderCover | None] = {}  # folder images, per folder
+        shown_cover: ShownCover | None = None  # the single common cover currently displayed
+        cover_request = 0  # lets a newer refresh_cover() supersede an older, slower one
 
         ui.add_head_html(SUPPRESS_BROWSER_SAVE)
         ui.query(".nicegui-content").classes("h-screen p-2 gap-2 flex-nowrap")
@@ -51,7 +61,7 @@ def build_app(config: Config) -> None:
             open_button = ui.button("Open folder…", icon="folder_open")
             open_button.on_click(lambda: open_folder())
             open_button.props("unelevated")
-            recursive = ui.checkbox("Include subfolders")
+            recursive = ui.checkbox("Include subfolders", value=True)
             ui.select(
                 COLUMN_LABELS,
                 multiple=True,
@@ -83,13 +93,24 @@ def build_app(config: Config) -> None:
             with splitter.before:
                 grid = FileGrid(on_selection=lambda paths: on_selection(paths))
             with splitter.after:
-                panel = TagPanel(on_change=lambda field, value: on_panel_change(field, value))
+                panel = TagPanel(
+                    on_change=lambda field, value: on_panel_change(field, value),
+                    on_cover_upload=lambda name, data: add_cover(name, data),
+                    on_cover_extract=lambda: extract_cover(),
+                    on_cover_folder_action=lambda: cover_folder_action(),
+                    on_cover_remove=lambda: remove_cover(),
+                )
 
         ui.keyboard(on_key=lambda e: on_key(e), ignore=[])
 
         # --- state -> view ----------------------------------------------------------------
         def row(path: Path) -> dict:
-            return track_row(buffer.track(path), buffer.effective_tags(path), buffer.is_dirty(path))
+            return track_row(
+                buffer.track(path),
+                buffer.effective_tags(path),
+                buffer.is_dirty(path),
+                buffer.effective_has_cover(path),
+            )
 
         def refresh_rows(paths: list[Path]) -> None:
             if paths:
@@ -124,6 +145,57 @@ def build_app(config: Config) -> None:
                         info += f" {skipped} unreadable file(s) are skipped."
                 panel.show(heading, info, merged, pending_fields(editable))
 
+        async def refresh_cover() -> None:
+            """Show the cover of the selection, loading covers from disk where not yet known."""
+            nonlocal shown_cover, cover_request
+            cover_request += 1
+            mine = cover_request
+            editable = editable_paths()
+            if not editable:
+                return
+            pending = [buffer.pending_cover(p) for p in editable]
+            modified = any(c is not UNCHANGED for c in pending)
+            moves = {c.filename for c in pending if isinstance(c, MoveCoverToFolder)}
+            note = f"{', '.join(sorted(moves))} is written on save" if moves else ""
+            if len(editable) > MAX_COVER_PREVIEW:
+                shown_cover = None
+                panel.show_cover(None, modified=modified, note=note)
+                return
+            missing = [
+                p for p in editable if buffer.pending_cover(p) is UNCHANGED and p not in covers
+            ]
+            if missing:
+                loaded, errors = await run.io_bound(load_covers, missing, reader)
+                covers.update(loaded)
+                if mine != cover_request:  # the selection changed while we were reading
+                    return
+                for path, error in list(errors.items())[:3]:
+                    ui.notify(f"Cannot read cover of {path.name}: {error}", type="warning")
+            embedded: list[CoverArt | None] = []
+            for path, change in zip(editable, pending, strict=True):
+                if change is UNCHANGED:
+                    embedded.append(covers.get(path))
+                else:  # a move takes the picture out of the file, like a removal
+                    embedded.append(change if isinstance(change, CoverArt) else None)
+            # Files without an embedded cover fall back to the image in their folder.
+            folders = {p.parent for p, cover in zip(editable, embedded, strict=True) if not cover}
+            unknown_folders = [f for f in folders if f not in folder_covers]
+            if unknown_folders:
+                folder_covers.update(await run.io_bound(load_folder_covers, unknown_folders))
+                if mine != cover_request:
+                    return
+            effective: list[ShownCover | None] = []
+            for path, cover in zip(editable, embedded, strict=True):
+                if cover:
+                    effective.append(ShownCover(cover))
+                elif folder_image := folder_covers.get(path.parent):
+                    effective.append(ShownCover(folder_image.cover, folder_image.name))
+                else:
+                    effective.append(None)
+            merged = merge_covers(effective)
+            shown_cover = merged.shown
+            panel.show_cover(merged, modified=modified, note=note)
+
         def refresh_status() -> None:
             nonlocal unload_guard_active
             dirty = len(buffer.dirty_paths())
@@ -151,12 +223,13 @@ def build_app(config: Config) -> None:
                 refresh_status()  # restores the state-dependent enabled flags
 
         # --- actions ----------------------------------------------------------------------
-        def on_selection(paths: list[Path]) -> None:
+        async def on_selection(paths: list[Path]) -> None:
             nonlocal selected
             selected = [p for p in paths if p in set(buffer.paths)]
             buffer.break_edit()
             refresh_panel()
             refresh_status()
+            await refresh_cover()
 
         def on_panel_change(field: str, value: str) -> None:
             editable = editable_paths()
@@ -173,10 +246,62 @@ def build_app(config: Config) -> None:
                 panel.mark_state(pending_fields(editable), mixed)
             refresh_status()
 
-        def undo() -> None:
+        async def undo() -> None:
             refresh_rows(buffer.undo())
             refresh_panel()
             refresh_status()
+            await refresh_cover()
+
+        # --- cover art --------------------------------------------------------------------
+        async def apply_cover(cover: CoverArt | None) -> None:
+            editable = editable_paths()
+            changed = buffer.set_cover(editable, cover)
+            refresh_rows(changed)
+            refresh_status()
+            await refresh_cover()
+
+        async def add_cover(name: str, data: bytes) -> None:
+            if not editable_paths():
+                return
+            try:
+                info = sniff_image(data)  # judged by content, whatever the file is called
+            except ValueError as exc:
+                ui.notify(f"{name}: {exc}", type="negative")
+                return
+            await apply_cover(CoverArt(data, info.mime))
+
+        async def remove_cover() -> None:
+            await apply_cover(None)
+
+        async def cover_folder_action() -> None:
+            """Embedded cover -> image file in the folder; folder image -> embedded cover."""
+            shown = shown_cover
+            editable = editable_paths()
+            if shown is None or not editable:
+                return
+            if shown.folder_file:  # only a folder image: embed it into the files
+                await apply_cover(shown.cover)
+                return
+            filename = FOLDER_COVER_NAMES[shown.cover.mime]
+            conflicts = await run.io_bound(
+                find_folder_cover_conflicts, editable, filename, shown.cover
+            )
+            for message in list(conflicts.values())[:3]:
+                ui.notify(f"{message}: skipped", type="warning")
+            movable = [p for p in editable if p.parent not in conflicts]
+            changed = buffer.set_cover(movable, MoveCoverToFolder(shown.cover, filename))
+            refresh_rows(changed)
+            refresh_status()
+            await refresh_cover()
+
+        def extract_cover() -> None:
+            shown = shown_cover
+            if shown is None:
+                return
+            cover = shown.cover
+            editable = editable_paths()
+            stem = editable[0].stem if len(editable) == 1 else "cover"
+            ui.download.content(cover.data, f"{stem}{EXTENSIONS[cover.mime]}", cover.mime)
 
         async def revert() -> None:
             n = len(buffer.dirty_paths())
@@ -184,9 +309,10 @@ def build_app(config: Config) -> None:
                 refresh_rows(buffer.discard())
                 refresh_panel()
                 refresh_status()
+                await refresh_cover()
 
         async def save() -> None:
-            changes = {p: buffer.pending(p) for p in buffer.dirty_paths()}
+            changes = {p: buffer.pending_edit(p) for p in buffer.dirty_paths()}
             if not changes:
                 return
             version = version_select.value
@@ -202,9 +328,13 @@ def build_app(config: Config) -> None:
             saved = [r.track for r in results if r.track and not r.error]
             failed = [r for r in results if r.error]
             buffer.apply_saved(saved)
+            for track in saved:
+                covers.pop(track.path, None)  # reload from the file that was just written
+                folder_covers.pop(track.path.parent, None)  # a cover file may have been written
             refresh_rows([t.path for t in saved])
             refresh_panel()
             set_busy(False)
+            await refresh_cover()
             if saved:
                 ui.notify(f"Saved {len(saved)} file(s)", type="positive")
             for result in failed[:5]:
@@ -242,6 +372,8 @@ def build_app(config: Config) -> None:
                 busy.dismiss()
             folder, selected = path, []
             buffer.load(tracks)
+            covers.clear()
+            folder_covers.clear()
             grid.set_rows([row(p) for p in buffer.paths])
             refresh_panel()
             refresh_status()

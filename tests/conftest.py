@@ -9,7 +9,7 @@ _FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(413)
 
 @pytest.fixture
 def make_mp3():
-    def _make(path: Path, frames: int = 40, **tags: str) -> Path:
+    def _make(path: Path, frames: int = 40, **tags: str | bytes) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_FRAME * frames)
         if tags:
@@ -21,8 +21,9 @@ def make_mp3():
             for name, value in tags.items():
                 if name == "comment":
                     id3.add(COMM(encoding=3, lang="eng", desc="", text=value))
-                elif name == "cover":
-                    id3.add(APIC(encoding=3, mime="image/png", type=3, desc="", data=b"\x89PNG"))
+                elif name == "cover":  # a str is a dummy picture; pass image bytes for a real one
+                    data = value if isinstance(value, bytes) else b"\x89PNG"
+                    id3.add(APIC(encoding=3, mime="image/png", type=3, desc="", data=data))
                 else:
                     id3.add(frame_types[name](encoding=3, text=value))
             id3.save(path, v2_version=3)

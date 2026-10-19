@@ -6,21 +6,28 @@ from pathlib import Path
 import pytest
 from mutagen.id3 import ID3
 from nicegui import ui
+from nicegui.elements.upload_files import SmallFileUpload
 from nicegui.testing import User
 from nicegui.testing.user_interaction import UserInteraction
 
+from imagery import jpeg, png
 from mp3tagger.config import Config
 from mp3tagger.ui.app import build_app
 from mp3tagger.ui.file_grid import FileGrid
-
-pytest_plugins = ["nicegui.testing.user_plugin"]
 
 
 @pytest.fixture
 def music_root(make_mp3, tmp_path):
     root = tmp_path / "music"
     make_mp3(root / "rock" / "b.mp3", title="Beta", artist="Band", year="2001", track="2")
-    make_mp3(root / "rock" / "a.mp3", title="Alpha", artist="Band", year="2000", track="1")
+    make_mp3(
+        root / "rock" / "a.mp3",
+        title="Alpha",
+        artist="Band",
+        year="2000",
+        track="1",
+        cover=png(3, 2),
+    )
     make_mp3(root / "rock" / "deep" / "c.mp3", title="Gamma")
     (root / "empty").mkdir()
     return root
@@ -48,9 +55,11 @@ def click_folder_entry(user: User, name: str) -> None:
 
 
 async def open_folder(user: User, music_root, subfolder: str, *, recursive: bool = False) -> None:
+    """Open `subfolder` of the music root. "Include subfolders" is ticked by default, so it is
+    unticked here unless `recursive`."""
     build_app(Config(roots=(music_root,)))
     await user.open("/")
-    if recursive:
+    if not recursive:
         user.find("Include subfolders").click()
     user.find("Open folder…").click()
     await asyncio.sleep(0.1)
@@ -72,6 +81,17 @@ async def test_open_folder_populates_grid(user: User, music_root):
     assert 1.0 < rows[0]["duration"] < 1.1  # raw seconds, formatted client-side
     assert rows[0]["bitrate"] == 128_000
     await user.should_see("2 files · 0 selected")
+
+
+async def test_subfolders_are_included_by_default(user: User, music_root):
+    build_app(Config(roots=(music_root,)))
+    await user.open("/")
+    user.find("Open folder…").click()
+    await asyncio.sleep(0.1)
+    click_folder_entry(user, "rock")
+    click_in_dialog(user, ui.button, "Open")  # without touching the checkbox
+    await user.should_see(kind=ui.label, content=" files · ", retries=100)
+    assert sorted(r["filename"] for r in grid_rows(user)) == ["a.mp3", "b.mp3", "c.mp3"]
 
 
 async def test_include_subfolders(user: User, music_root):
@@ -122,8 +142,10 @@ def button(user: User, text: str) -> ui.button:
     return element
 
 
-def click(user: User, text: str) -> None:
+async def click(user: User, text: str) -> None:
+    """Click a toolbar/panel button and give its (possibly async) handler time to finish."""
     UserInteraction(user, {button(user, text)}, text).click()
+    await asyncio.sleep(0.05)
 
 
 def row_for(user: User, path: Path) -> dict:
@@ -161,7 +183,7 @@ async def test_editing_marks_row_dirty_and_enables_save(user: User, editing):
 async def test_save_writes_file_and_clears_dirty(user: User, editing):
     type_into(user, "Title", "Edited")
     type_into(user, "Genre", "Jazz")
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Saved 1 file(s)")
     tags = ID3(editing)
     assert tags["TIT2"].text == ["Edited"] and tags["TCON"].text == ["Jazz"]
@@ -185,7 +207,7 @@ async def test_save_as_v24_and_v1(user: User, editing):
     select_.set_value(4)
     v1.set_value(True)
     type_into(user, "Title", "Edited")
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Saved 1 file(s)")
     assert ID3(editing, load_v1=False).version[:2] == (2, 4)
     assert editing.read_bytes()[-128:-125] == b"TAG"
@@ -195,7 +217,7 @@ async def test_undo_reverts_edit(user: User, editing):
     assert not button(user, "Undo").enabled
     type_into(user, "Title", "Edited")
     assert button(user, "Undo").enabled
-    click(user, "Undo")
+    await click(user, "Undo")
     assert row_for(user, editing)["title"] == "Alpha"
     assert row_for(user, editing)["dirty"] is False
     assert field(user, "Title").value == "Alpha"
@@ -203,9 +225,9 @@ async def test_undo_reverts_edit(user: User, editing):
 
 async def test_revert_all_asks_for_confirmation(user: User, editing):
     type_into(user, "Title", "Edited")
-    click(user, "Revert all")
+    await click(user, "Revert all")
     await user.should_see("Discard unsaved changes in 1 file(s)?")
-    click(user, "Discard")
+    await click(user, "Discard")
     await asyncio.sleep(0.1)
     assert row_for(user, editing)["dirty"] is False
     assert field(user, "Title").value == "Alpha"
@@ -213,16 +235,16 @@ async def test_revert_all_asks_for_confirmation(user: User, editing):
 
 async def test_opening_folder_with_unsaved_changes_asks_first(user: User, editing):
     type_into(user, "Title", "Edited")
-    click(user, "Open folder")
+    await click(user, "Open folder")
     await user.should_see("unsaved changes")
-    click(user, "Cancel")
+    await click(user, "Cancel")
     await asyncio.sleep(0.1)
     assert row_for(user, editing)["dirty"] is True  # nothing was discarded
 
 
 async def test_invalid_year_fails_save_but_keeps_edit(user: User, editing):
     type_into(user, "Year", "abcd")
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Invalid year")
     assert ID3(editing)["TDRC"].text[0].year == 2000
     assert row_for(user, editing)["dirty"] is True
@@ -235,7 +257,7 @@ async def test_failure_of_one_file_does_not_block_the_other(user: User, music_ro
     type_into(user, "Year", "abcd")
     await select(user, monkeypatch, b)
     type_into(user, "Title", "Beta2")
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Saved 1 file(s)")
     assert ID3(b)["TIT2"].text == ["Beta2"]
     assert row_for(user, a)["dirty"] is True and row_for(user, b)["dirty"] is False
@@ -270,7 +292,7 @@ async def test_batch_edit_applies_to_all_files_and_keeps_other_fields(user: User
         assert row_for(user, path)["dirty"] is True
     assert [row_for(user, p)["title"] for p in batch] == ["Alpha", "Beta"]
     await user.should_see("2 modified")
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Saved 2 file(s)")
     for path, title in ((a, "Alpha"), (b, "Beta")):
         tags = ID3(path)
@@ -286,7 +308,7 @@ async def test_batch_edit_of_a_differing_field_overwrites_all(user: User, batch)
 async def test_clearing_a_field_in_batch_clears_it_everywhere(user: User, batch):
     type_into(user, "Title", "")
     assert [row_for(user, p)["title"] for p in batch] == ["", ""]
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Saved 2 file(s)")
     assert all("TIT2" not in ID3(p) for p in batch)
 
@@ -307,7 +329,7 @@ async def test_keep_without_an_edit_in_progress_shows_the_real_value_again(user:
 
 async def test_undo_reverts_the_whole_batch_edit(user: User, batch):
     type_into(user, "Artist", "New Band")
-    click(user, "Undo")
+    await click(user, "Undo")
     assert [row_for(user, p)["artist"] for p in batch] == ["Band", "Band"]
     assert field(user, "Artist").value == "Band"
 
@@ -337,8 +359,404 @@ async def test_edits_do_not_rebuild_the_grid(user: User, editing, monkeypatch):
     rebuilds = []
     monkeypatch.setattr(ui.aggrid, "update", lambda self: rebuilds.append(1))
     type_into(user, "Title", "Edited")
-    click(user, "Undo")
+    await click(user, "Undo")
     type_into(user, "Title", "Edited again")
-    click(user, "Save")
+    await click(user, "Save")
     await user.should_see("Saved 1 file(s)")
     assert rebuilds == []
+
+
+# --- cover art -------------------------------------------------------------------------------
+
+NEW_COVER = png(5, 4)
+
+
+async def upload_cover(user: User, name: str, data: bytes) -> None:
+    (upload,) = (e for e in user.client.elements.values() if isinstance(e, ui.upload))
+    await upload.handle_uploads([SmallFileUpload(name, "application/octet-stream", data)])
+    await asyncio.sleep(0.1)
+
+
+def cover_buttons(user: User) -> dict[str, bool]:
+    """Enabled state of the cover buttons (the first one's label changes with the state)."""
+    labels = (
+        "Add cover",
+        "Replace",
+        "Replace all",
+        "Set cover",
+        "Extract",
+        "To folder",
+        "From folder",
+        "Remove",
+    )
+    return {
+        b.props["label"]: b.enabled
+        for b in user.client.elements.values()
+        if isinstance(b, ui.button) and b.props.get("label") in labels
+    }
+
+
+async def test_cover_is_shown_for_single_mixed_and_missing(user: User, music_root, monkeypatch):
+    await open_folder(user, music_root, "rock")
+    rock = music_root / "rock"
+    await select(user, monkeypatch, rock / "a.mp3")
+    await user.should_see("PNG · 3×2")
+    assert cover_buttons(user) == {
+        "Replace": True,
+        "Extract": True,
+        "To folder": True,
+        "Remove": True,
+    }
+    await select(user, monkeypatch, rock / "b.mp3")
+    await user.should_see("No embedded cover")
+    assert cover_buttons(user) == {
+        "Add cover": True,
+        "Extract": False,
+        "To folder": False,
+        "Remove": False,
+    }
+    await select(user, monkeypatch, rock / "a.mp3", rock / "b.mp3")
+    await user.should_see("Covers differ between the files")
+    assert cover_buttons(user) == {
+        "Replace all": True,
+        "Extract": False,
+        "To folder": False,
+        "Remove": True,
+    }
+
+
+async def test_added_cover_is_pending_until_saved(user: User, music_root, monkeypatch):
+    await open_folder(user, music_root, "rock")
+    b = music_root / "rock" / "b.mp3"
+    await select(user, monkeypatch, b)
+    await upload_cover(user, "front.png", NEW_COVER)
+    await user.should_see("PNG · 5×4")
+    await user.should_see("modified")
+    assert row_for(user, b)["cover"] == "✓" and row_for(user, b)["dirty"] is True
+    assert not ID3(b).getall("APIC")  # not written yet
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    assert [f.data for f in ID3(b).getall("APIC")] == [NEW_COVER]
+    assert row_for(user, b)["dirty"] is False
+    await user.should_see("PNG · 5×4")
+
+
+async def test_cover_is_judged_by_content_not_file_name(user: User, editing):
+    await upload_cover(user, "photo.jpg", NEW_COVER)  # a PNG called .jpg
+    await user.should_see("PNG · 5×4")
+
+
+async def test_non_image_upload_is_rejected(user: User, editing):
+    await upload_cover(user, "notes.png", b"definitely not an image")
+    await user.should_see("Unsupported image format")
+    assert row_for(user, editing)["dirty"] is False
+    await user.should_see("PNG · 3×2")  # the old cover is still shown
+
+
+async def test_remove_cover_and_save(user: User, editing):
+    await click(user, "Remove")
+    await user.should_see("No embedded cover")
+    assert row_for(user, editing)["cover"] == "" and row_for(user, editing)["dirty"] is True
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    assert not ID3(editing).getall("APIC")
+
+
+async def test_undo_restores_the_cover(user: User, editing):
+    await upload_cover(user, "x.png", NEW_COVER)
+    await user.should_see("PNG · 5×4")
+    await click(user, "Undo")
+    await user.should_see("PNG · 3×2")
+    assert row_for(user, editing)["dirty"] is False
+
+
+async def test_revert_all_restores_the_cover(user: User, editing):
+    await click(user, "Remove")
+    await click(user, "Revert all")
+    await click(user, "Discard")
+    await user.should_see("PNG · 3×2")
+    assert row_for(user, editing)["dirty"] is False
+
+
+async def test_replace_cover_of_all_selected_files(user: User, batch):
+    a, b = batch
+    await upload_cover(user, "x.png", NEW_COVER)
+    await user.should_see("PNG · 5×4")
+    assert [row_for(user, p)["cover"] for p in batch] == ["✓", "✓"]
+    await click(user, "Save")
+    await user.should_see("Saved 2 file(s)")
+    assert [[f.data for f in ID3(p).getall("APIC")] for p in (a, b)] == [[NEW_COVER], [NEW_COVER]]
+
+
+def capture_downloads(monkeypatch) -> list[tuple[bytes, str | None, str]]:
+    downloads = []
+
+    def content(data, filename=None, media_type=""):
+        downloads.append((data, filename, media_type))
+
+    monkeypatch.setattr(ui.download, "content", content)
+    return downloads
+
+
+async def test_extract_downloads_the_shown_cover(user: User, editing, monkeypatch):
+    downloads = capture_downloads(monkeypatch)
+    await user.should_see("PNG · 3×2")
+    await click(user, "Extract")
+    assert downloads == [(png(3, 2), "a.png", "image/png")]
+
+
+async def test_extract_shows_a_pending_cover(user: User, editing, monkeypatch):
+    downloads = capture_downloads(monkeypatch)
+    await upload_cover(user, "x.png", NEW_COVER)
+    await user.should_see("PNG · 5×4")
+    await click(user, "Extract")
+    assert [data for data, _, _ in downloads] == [NEW_COVER]
+
+
+async def test_cover_column_reflects_files(user: User, music_root):
+    await open_folder(user, music_root, "rock")
+    rows = {r["filename"]: r["cover"] for r in grid_rows(user)}
+    assert rows == {"a.mp3": "✓", "b.mp3": ""}
+
+
+async def test_jpeg_cover_is_stored_with_its_mime_type(user: User, music_root, monkeypatch):
+    await open_folder(user, music_root, "rock")
+    b = music_root / "rock" / "b.mp3"
+    await select(user, monkeypatch, b)
+    await upload_cover(user, "x.jpg", jpeg(40, 30))
+    await user.should_see("JPEG · 40×30")
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    (apic,) = ID3(b).getall("APIC")
+    assert (apic.mime, apic.type) == ("image/jpeg", 3)
+
+
+# --- moving the cover into the album folder --------------------------------------------------
+
+
+async def test_move_cover_to_folder_is_pending_until_saved(user: User, editing, music_root):
+    folder_image = music_root / "rock" / "cover.png"
+    await click(user, "To folder")
+    await user.should_see("cover.png is written on save")
+    assert row_for(user, editing)["cover"] == "" and row_for(user, editing)["dirty"] is True
+    assert not folder_image.exists()
+    assert ID3(editing).getall("APIC")  # the file is untouched until saved
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    assert folder_image.read_bytes() == png(3, 2)
+    assert not ID3(editing).getall("APIC")
+    # The file now has no embedded picture; the panel shows the folder image it was moved to.
+    await user.should_see("PNG · 3×2")
+    await user.should_see("folder image (cover.png)")
+    assert row_for(user, editing)["dirty"] is False
+
+
+async def test_move_cover_can_be_undone(user: User, editing, music_root):
+    await click(user, "To folder")
+    await click(user, "Undo")
+    await user.should_see("PNG · 3×2")
+    assert row_for(user, editing)["dirty"] is False
+    assert not (music_root / "rock" / "cover.png").exists()
+
+
+async def test_move_cover_skips_a_folder_with_a_different_image(user: User, editing, music_root):
+    (music_root / "rock" / "cover.png").write_bytes(b"another image")
+    await click(user, "To folder")
+    await user.should_see("already exists with other content")
+    assert row_for(user, editing)["dirty"] is False
+    assert ID3(editing).getall("APIC")
+    assert (music_root / "rock" / "cover.png").read_bytes() == b"another image"
+
+
+async def test_move_cover_of_a_whole_album_writes_one_image(
+    user: User, make_mp3, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    a, b = rock / "a.mp3", rock / "b.mp3"
+    make_mp3(b, title="Beta", cover=png(3, 2))  # same cover as a.mp3
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, a, b)
+    await user.should_see("PNG · 3×2")
+    await click(user, "To folder")
+    assert [row_for(user, p)["dirty"] for p in (a, b)] == [True, True]
+    await click(user, "Save")
+    await user.should_see("Saved 2 file(s)")
+    assert (rock / "cover.png").read_bytes() == png(3, 2)
+    assert not ID3(a).getall("APIC") and not ID3(b).getall("APIC")
+
+
+async def test_a_jpeg_cover_becomes_cover_jpg(user: User, music_root, monkeypatch):
+    await open_folder(user, music_root, "rock")
+    b = music_root / "rock" / "b.mp3"
+    await select(user, monkeypatch, b)
+    data = jpeg(40, 30)
+    await upload_cover(user, "x.jpg", data)
+    await user.should_see("JPEG · 40×30")
+    await click(user, "To folder")
+    await user.should_see("cover.jpg is written on save")
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    assert (music_root / "rock" / "cover.jpg").read_bytes() == data
+    assert not ID3(b).getall("APIC")
+
+
+async def test_failed_move_keeps_the_pending_change_and_the_embedded_cover(
+    user: User, editing, music_root
+):
+    await click(user, "To folder")
+    await user.should_see("cover.png is written on save")  # planned: nothing in the way yet
+    (music_root / "rock" / "cover.png").write_bytes(b"appeared meanwhile")
+    await click(user, "Save")
+    await user.should_see("already exists with other content")
+    assert row_for(user, editing)["dirty"] is True
+    assert ID3(editing).getall("APIC")
+
+
+# --- folder image fallback -------------------------------------------------------------------
+
+
+async def test_a_file_without_embedded_cover_shows_the_folder_image(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    (rock / "cover.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "b.mp3")  # b.mp3 has no embedded cover
+    await user.should_see("JPEG · 40×30")
+    await user.should_see("folder image (cover.jpg)")
+    # Nothing is embedded, so it cannot be removed; it can be embedded instead of moved.
+    assert cover_buttons(user) == {
+        "Add cover": True,
+        "Extract": True,
+        "From folder": True,
+        "Remove": False,
+    }
+    assert row_for(user, rock / "b.mp3")["cover"] == ""  # the Cover column is about embedded art
+
+
+async def test_embedded_cover_wins_over_the_folder_image(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    (rock / "cover.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "a.mp3")  # a.mp3 has an embedded 3×2 PNG
+    await user.should_see("PNG · 3×2")
+    await user.should_not_see("folder image")
+
+
+async def test_embedded_and_folder_covers_in_one_selection_differ(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    (rock / "cover.png").write_bytes(png(3, 2))  # the very same picture as a.mp3 embeds
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "a.mp3", rock / "b.mp3")
+    await user.should_see("Covers differ between the files")
+
+
+async def test_removing_the_embedded_cover_reveals_the_folder_image(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    (rock / "folder.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "a.mp3")
+    await click(user, "Remove")
+    await user.should_see("folder image (folder.jpg)")
+    await user.should_see("modified")
+    assert cover_buttons(user)["Remove"] is False
+
+
+async def test_adding_a_cover_to_a_file_with_a_folder_image_embeds_it(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    (rock / "cover.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock")
+    b = rock / "b.mp3"
+    await select(user, monkeypatch, b)
+    await upload_cover(user, "x.png", NEW_COVER)
+    await user.should_see("PNG · 5×4")
+    await user.should_not_see("folder image")
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    assert [f.data for f in ID3(b).getall("APIC")] == [NEW_COVER]
+    assert (rock / "cover.jpg").read_bytes() == jpeg(40, 30)  # the folder image is untouched
+
+
+async def test_extract_downloads_the_folder_image(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    (rock / "cover.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "b.mp3")
+    await user.should_see("folder image (cover.jpg)")
+    downloads = capture_downloads(monkeypatch)
+    await click(user, "Extract")
+    assert downloads == [(jpeg(40, 30), "b.jpg", "image/jpeg")]
+
+
+async def test_no_cover_anywhere(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "b.mp3")
+    await user.should_see("No embedded cover or folder image")
+
+
+async def test_each_file_uses_the_image_of_its_own_folder(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    (rock / "deep" / "cover.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock", recursive=True)
+    await select(user, monkeypatch, rock / "deep" / "c.mp3")
+    await user.should_see("folder image (cover.jpg)")
+    await select(user, monkeypatch, rock / "b.mp3")  # its folder has no image
+    await user.should_see("No embedded cover or folder image")
+
+
+async def test_embed_the_folder_image_into_a_file(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    data = jpeg(40, 30)
+    (rock / "cover.jpg").write_bytes(data)
+    await open_folder(user, music_root, "rock")
+    b = rock / "b.mp3"
+    await select(user, monkeypatch, b)
+    await user.should_see("folder image (cover.jpg)")
+    await click(user, "From folder")
+    await user.should_see("modified")
+    await user.should_not_see("folder image")  # it is the embedded cover now
+    assert row_for(user, b)["cover"] == "✓" and row_for(user, b)["dirty"] is True
+    assert cover_buttons(user)["To folder"] is True  # an embedded cover again
+    assert not ID3(b).getall("APIC")  # pending until saved
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    (apic,) = ID3(b).getall("APIC")
+    assert (apic.data, apic.mime, apic.type) == (data, "image/jpeg", 3)
+    assert (rock / "cover.jpg").read_bytes() == data  # the folder image stays
+
+
+async def test_embed_the_folder_image_into_all_selected_files(
+    user: User, make_mp3, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    a, b = rock / "a.mp3", rock / "b.mp3"
+    make_mp3(a, title="Alpha")  # no embedded cover any more
+    (rock / "cover.png").write_bytes(NEW_COVER)
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, a, b)
+    await user.should_see("folder image (cover.png)")
+    await click(user, "From folder")
+    assert [row_for(user, p)["cover"] for p in (a, b)] == ["✓", "✓"]
+    await click(user, "Save")
+    await user.should_see("Saved 2 file(s)")
+    assert [[f.data for f in ID3(p).getall("APIC")] for p in (a, b)] == [[NEW_COVER], [NEW_COVER]]
+
+
+async def test_embedding_the_folder_image_can_be_undone(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    (rock / "cover.jpg").write_bytes(jpeg(40, 30))
+    await open_folder(user, music_root, "rock")
+    b = rock / "b.mp3"
+    await select(user, monkeypatch, b)
+    await user.should_see("folder image (cover.jpg)")
+    await click(user, "From folder")
+    await click(user, "Undo")
+    await user.should_see("folder image (cover.jpg)")
+    assert row_for(user, b)["dirty"] is False
