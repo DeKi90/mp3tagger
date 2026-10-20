@@ -10,7 +10,9 @@ from mp3tagger.core.editing import EditBuffer
 from mp3tagger.core.folder_cover import FolderCover, load_folder_covers
 from mp3tagger.core.images import EXTENSIONS, FOLDER_COVER_NAMES, sniff_image
 from mp3tagger.core.library import load_covers, scan_folder
+from mp3tagger.core.lookup import LocalFile, scan_discs
 from mp3tagger.core.models import UNCHANGED, CoverArt, MoveCoverToFolder, TagSet
+from mp3tagger.core.musicbrainz import MusicBrainz
 from mp3tagger.core.rename import RenameError, apply_renames
 from mp3tagger.core.saving import find_folder_cover_conflicts, write_changes
 from mp3tagger.core.tagio.base import SaveOptions
@@ -19,6 +21,7 @@ from mp3tagger.services.fs import PathOutsideRootsError, Sandbox
 from mp3tagger.ui.dialogs import converters, transforms
 from mp3tagger.ui.dialogs.confirm import confirm
 from mp3tagger.ui.dialogs.folder_browser import pick_folder
+from mp3tagger.ui.dialogs.lookup import lookup_dialog
 from mp3tagger.ui.file_grid import COLUMN_LABELS, DEFAULT_VISIBLE, FileGrid, track_row
 from mp3tagger.ui.tag_panel import TagPanel, format_info
 
@@ -37,9 +40,17 @@ window.addEventListener('keydown', (e) => {
 """
 
 
-def build_app(config: Config) -> None:
+def build_app(config: Config, musicbrainz: MusicBrainz | None = None) -> None:
+    """Register the page. `musicbrainz` is injectable for tests; by default one client is shared
+    by all sessions, so MusicBrainz's request limit holds for the whole process."""
     sandbox = Sandbox(config.roots)
     reader, writer = Id3Reader(), Id3Writer()
+    shared: list[MusicBrainz] = [musicbrainz] if musicbrainz else []
+
+    def musicbrainz_client() -> MusicBrainz:
+        if not shared:  # created on first use, inside the running event loop
+            shared.append(MusicBrainz(contact=config.contact))
+        return shared[0]
 
     @ui.page("/")
     def index() -> None:
@@ -81,6 +92,8 @@ def build_app(config: Config) -> None:
             undo_button.props("outline")
             revert_button = ui.button("Revert all", icon="restore", on_click=lambda: revert())
             revert_button.props("outline")
+            lookup_button = ui.button("Look up", icon="cloud_download", on_click=lambda: lookup())
+            lookup_button.props("outline")
             convert_button = ui.button("Convert", icon="transform").props("outline")
             with convert_button, ui.menu():
                 ui.menu_item("Filename → Tag…", on_click=lambda: convert_filename_to_tag())
@@ -97,7 +110,14 @@ def build_app(config: Config) -> None:
                 .classes("min-w-48")
             )
             write_v1 = ui.checkbox("Also write ID3v1")
-        controls = [open_button, save_button, undo_button, revert_button, convert_button]
+        controls = [
+            open_button,
+            save_button,
+            undo_button,
+            revert_button,
+            lookup_button,
+            convert_button,
+        ]
 
         # --- grid + tag panel -------------------------------------------------------------
         with ui.splitter(value=70).classes("w-full flex-grow min-h-0") as splitter:
@@ -221,6 +241,7 @@ def build_app(config: Config) -> None:
             save_button.set_enabled(bool(dirty))
             revert_button.set_enabled(bool(dirty))
             undo_button.set_enabled(buffer.can_undo)
+            lookup_button.set_enabled(bool(editable_paths()))
             convert_button.set_enabled(bool(editable_paths()))
             if bool(dirty) != unload_guard_active:  # warn before closing the tab with unsaved edits
                 unload_guard_active = bool(dirty)
@@ -262,6 +283,27 @@ def build_app(config: Config) -> None:
             refresh_rows(buffer.undo())
             refresh_panel()
             refresh_status()
+            await refresh_cover()
+
+        # --- online lookup ----------------------------------------------------------------
+        async def lookup() -> None:
+            editable = editable_paths()
+            scan = await run.io_bound(scan_discs, editable, reader)  # reads the MCDI frames
+            tags = {p: buffer.effective_tags(p) for p in editable}
+            files = [
+                LocalFile(p, buffer.track(p).info.duration, tags[p].track, tags[p].disc)
+                for p in editable
+            ]
+            first = tags[editable[0]]
+            result = await lookup_dialog(
+                musicbrainz_client(), files, scan, first.artist, first.album
+            )
+            if result is None:
+                return
+            changed = buffer.set_fields(result.changes)
+            if result.cover is not None:
+                changed += buffer.set_cover(list(result.paired), result.cover)
+            after_bulk_edit(sorted(set(changed)), "MusicBrainz")
             await refresh_cover()
 
         # --- converters -------------------------------------------------------------------

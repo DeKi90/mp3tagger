@@ -18,6 +18,10 @@ class SaveOptions:
 class TagReader(Protocol):
     extensions: tuple[str, ...]
 
+    def read_mcdi(self, path: Path) -> bytes | None:
+        """The CD table of contents stored in the file (ID3 MCDI frame), or None."""
+        ...
+
     def read_cover(self, path: Path) -> CoverArt | None:
         """The cover picture, or None. Raises MutagenError/OSError if the file is unreadable."""
         ...

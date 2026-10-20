@@ -105,6 +105,15 @@ class Id3Reader:
         picture = _main_picture(tags)
         return CoverArt(bytes(picture.data), picture.mime) if picture else None
 
+    def read_mcdi(self, path: Path) -> bytes | None:
+        """The CD table of contents stored in the file (MCDI frame), or None."""
+        try:
+            tags = ID3(path)
+        except ID3NoHeaderError:
+            return None
+        frames = tags.getall("MCDI")
+        return bytes(frames[0].data) if frames else None
+
     def read(self, path: Path) -> Track:
         try:
             audio = MP3(path)
