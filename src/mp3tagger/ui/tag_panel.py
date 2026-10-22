@@ -6,7 +6,7 @@ from dataclasses import fields
 
 from nicegui import ui
 
-from mp3tagger.core.batch import MergedCover, MergedTags
+from mp3tagger.core.batch import KEEP, MergedCover, MergedTags
 from mp3tagger.core.images import MAX_COVER_BYTES, sniff_image
 from mp3tagger.core.models import FIELD_NAMES, YEAR_FORMATS, TagSet, Track, is_valid_year
 from mp3tagger.ui.dialogs.parts import data_url
@@ -31,6 +31,12 @@ def _toggle_prop(element: ui.element, prop: str, on: bool) -> None:
         element.props(prop)
     else:
         element.props(remove=prop.split("=")[0])
+
+
+def year_input_ok(value: str | None) -> bool:
+    """Whether the year input holds something acceptable: a date, nothing, or the `<keep>`
+    placeholder shown when the selected files have different years."""
+    return value is None or value == KEEP or is_valid_year(value)
 
 
 def format_info(track: Track) -> str:
@@ -185,7 +191,7 @@ class TagPanel:
         self._cover_remove.set_enabled(removable)
 
     def _make_input(self, name: str) -> ui.input:
-        validation = {f"Expected {YEAR_FORMATS}": is_valid_year} if name == "year" else None
+        validation = {f"Expected {YEAR_FORMATS}": year_input_ok} if name == "year" else None
         return (
             ui.input(
                 LABELS[name],

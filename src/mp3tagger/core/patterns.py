@@ -4,6 +4,10 @@ file names (or other tag values) from tags.
 Placeholders are the tag field names (``%albumartist%`` is accepted for ``%album_artist%``),
 optionally with a zero-padding width: ``%track:2%`` turns 3 into 03. When reading, ``%ignore%``
 matches a part of the name without storing it.
+
+A ``/`` in a pattern separates folder levels below the folder that is open in the application:
+when writing file names the folders are created there, when reading they are matched against the
+path of each file relative to it.
 """
 
 import re
@@ -89,11 +93,27 @@ def compile_parse_pattern(pattern: str) -> ParsePattern:
     return ParsePattern(tuple(components), tuple(fields))
 
 
-def parse_path(compiled: ParsePattern, path: Path) -> dict[str, str] | None:
-    """The tag values `path` encodes, or None if it does not match. The extension is ignored."""
+def relative_path(path: Path, base: Path | None) -> Path:
+    """`path` below `base`; just the file name if it is not below it (or there is no base)."""
+    if base is not None:
+        try:
+            return path.relative_to(base)
+        except ValueError:
+            pass
+    return Path(path.name)
+
+
+def parse_path(compiled: ParsePattern, relative: Path) -> dict[str, str] | None:
+    """The tag values encoded in `relative`, a file's path below the open folder (the extension
+    is ignored), or None if it does not match.
+
+    A pattern without ``/`` reads the file name only, wherever the file is. A pattern with ``/``
+    must account for every folder level: ``%artist%/%album%/%title%`` matches only files exactly
+    two folders down.
+    """
     depth = len(compiled.components)
-    names = [*path.parent.parts[-(depth - 1) :], path.stem] if depth > 1 else [path.stem]
-    if len(names) < depth:
+    names = [*relative.parent.parts, relative.stem] if depth > 1 else [relative.stem]
+    if len(names) != depth:
         return None
     values: dict[str, str] = {}
     for regex, name in zip(compiled.components, names, strict=True):
@@ -107,10 +127,13 @@ def parse_path(compiled: ParsePattern, path: Path) -> dict[str, str] | None:
     return values
 
 
-def parse_paths(paths: Sequence[Path], pattern: str) -> list[tuple[Path, dict[str, str] | None]]:
-    """Apply `pattern` to every path. Raises PatternError for an invalid pattern."""
+def parse_paths(
+    paths: Sequence[Path], pattern: str, base: Path | None = None
+) -> list[tuple[Path, dict[str, str] | None]]:
+    """Apply `pattern` to every path, read relative to `base`, the open folder. Raises
+    PatternError for an invalid pattern."""
     compiled = compile_parse_pattern(pattern)
-    return [(path, parse_path(compiled, path)) for path in paths]
+    return [(path, parse_path(compiled, relative_path(path, base))) for path in paths]
 
 
 # --- writing: tags -> text -----------------------------------------------------------------
@@ -118,57 +141,106 @@ def parse_paths(paths: Sequence[Path], pattern: str) -> list[tuple[Path, dict[st
 
 @dataclass(frozen=True)
 class FormatPattern:
-    tokens: tuple[Token, ...]
+    components: tuple[tuple[Token, ...], ...]  # one per path level, the last is the file name
     for_filename: bool
+
+    @property
+    def has_folders(self) -> bool:
+        return len(self.components) > 1
+
+
+def _split_levels(tokens: list[Token]) -> list[list[Token]]:
+    """Split a pattern into path levels at every ``/`` in its literal text."""
+    levels: list[list[Token]] = [[]]
+    for token in tokens:
+        if isinstance(token, str):
+            first, *rest = token.split("/")
+            if first:
+                levels[-1].append(first)
+            for part in rest:
+                levels.append([part] if part else [])
+        else:
+            levels[-1].append(token)
+    return levels
 
 
 def compile_format(pattern: str, *, for_filename: bool = False) -> FormatPattern:
-    """Compile a pattern for building text from tags. With `for_filename` the result is a file
-    name: values are made safe, and the pattern may not contain a folder separator."""
+    """Compile a pattern for building text from tags.
+
+    With `for_filename` the result is a path below the open folder: ``/`` (or ``\\``) separates
+    folder levels, values are made safe, and no level can be empty, ``.`` or ``..``.
+    """
     if not pattern.strip():
         raise PatternError("The pattern is empty")
-    tokens = tokenize(pattern)
+    tokens = tokenize(pattern.replace("\\", "/") if for_filename else pattern)
     if not any(isinstance(t, Placeholder) for t in tokens):
         raise PatternError("The pattern contains no field such as %title%")
     if any(isinstance(t, Placeholder) and t.field == IGNORE for t in tokens):
         raise PatternError("%ignore% only makes sense when reading file names")
-    if for_filename and any(isinstance(t, str) and ("/" in t or "\\" in t) for t in tokens):
-        raise PatternError("A file name cannot contain / or \\")
-    return FormatPattern(tuple(tokens), for_filename)
+    levels = _split_levels(tokens) if for_filename else [tokens]
+    for level in levels:
+        if not level:
+            raise PatternError("A folder or file name in the pattern is empty (check for //)")
+        if all(isinstance(t, str) for t in level) and "".join(map(str, level)).strip() in {
+            ".",
+            "..",
+        }:
+            raise PatternError("A folder name cannot be . or ..")
+    return FormatPattern(tuple(tuple(level) for level in levels), for_filename)
 
 
 @dataclass(frozen=True)
 class Formatted:
-    text: str
+    parts: tuple[str, ...]  # one per path level; just one unless the pattern has folders
     empty_fields: tuple[str, ...]  # fields used by the pattern that have no value
 
+    @property
+    def text(self) -> str:
+        return "/".join(self.parts)
 
-def format_tags(compiled: FormatPattern, tags: TagSet) -> Formatted:
-    """Build the text for `tags`. Raises PatternError if a file name would come out empty."""
+
+def _level(tokens: tuple[Token, ...], tags: TagSet, for_filename: bool, empty: list[str]) -> str:
     parts: list[str] = []
-    empty: list[str] = []
-    for token in compiled.tokens:
+    for token in tokens:
         if isinstance(token, str):
             parts.append(token)
             continue
         value = getattr(tags, token.field)
-        if compiled.for_filename and token.field in ("track", "disc"):
+        if for_filename and token.field in ("track", "disc"):
             value = value.partition("/")[0]  # "3/12" -> "3"
         if not value:
             empty.append(token.field)
         if token.width and value.isdigit():
             value = value.zfill(token.width)
-        parts.append(_ILLEGAL_IN_FILE_NAME.sub("_", value) if compiled.for_filename else value)
-    text = "".join(parts)
+        parts.append(_ILLEGAL_IN_FILE_NAME.sub("_", value) if for_filename else value)
+    return "".join(parts)
+
+
+def _safe_name(text: str, is_file: bool) -> str:
+    """Make one folder or file name safe, or raise PatternError if nothing usable is left."""
+    text = text.strip(" ").rstrip(". ")
+    if text.startswith("."):
+        text = "_" + text[1:]  # a leading dot would hide it from the file list
+    if not text:
+        raise PatternError(
+            "The file name would be empty" if is_file else "A folder name would be empty"
+        )
+    if len(text.encode()) > MAX_FILE_NAME_BYTES:
+        raise PatternError(
+            "The file name would be too long" if is_file else "A folder name would be too long"
+        )
+    return text
+
+
+def format_tags(compiled: FormatPattern, tags: TagSet) -> Formatted:
+    """Build the text for `tags`. For file names, raises PatternError if a level would come out
+    empty or too long."""
+    empty: list[str] = []
+    parts = [_level(level, tags, compiled.for_filename, empty) for level in compiled.components]
     if compiled.for_filename:
-        text = text.strip(" ").rstrip(". ")
-        if text.startswith("."):
-            text = "_" + text[1:]  # a leading dot would hide the file from the file list
-        if not text:
-            raise PatternError("The file name would be empty")
-        if len(text.encode()) > MAX_FILE_NAME_BYTES:
-            raise PatternError("The file name would be too long")
-    return Formatted(text, tuple(dict.fromkeys(empty)))
+        last = len(parts) - 1
+        parts = [_safe_name(text, index == last) for index, text in enumerate(parts)]
+    return Formatted(tuple(parts), tuple(dict.fromkeys(empty)))
 
 
 def format_values(

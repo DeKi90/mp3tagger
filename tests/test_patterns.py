@@ -10,10 +10,12 @@ from mp3tagger.core.patterns import (
     format_tags,
     parse_path,
     parse_paths,
+    relative_path,
 )
 
 
 def parse(pattern: str, path: str) -> dict[str, str] | None:
+    """Read `path`, which is relative to the open folder (as parse_paths computes it)."""
     return parse_path(compile_parse_pattern(pattern), Path(path))
 
 
@@ -77,39 +79,68 @@ def test_width_in_a_reading_pattern_is_accepted_and_ignored():
     assert parse("%track:2% %title%", "/m/3 Song.mp3") == {"track": "3", "title": "Song"}
 
 
-def test_folder_levels():
+def test_folder_levels_are_read_from_the_path_below_the_open_folder():
     pattern = "%artist%/%album%/%track% - %title%"
-    assert parse(pattern, "/music/Band/LP/01 - Song.mp3") == {
+    assert parse(pattern, "Band/LP/01 - Song.mp3") == {
         "artist": "Band",
         "album": "LP",
         "track": "01",
         "title": "Song",
     }
-    assert parse(pattern, "/Song.mp3") is None  # not enough folders
-    assert parse(pattern, "/music/Band/LP/NoTrack.mp3") is None
+    assert parse(pattern, "Song.mp3") is None  # not enough folders
+    assert parse(pattern, "LP/01 - Song.mp3") is None
+    assert parse(pattern, "Band/LP/NoTrack.mp3") is None
+
+
+def test_a_pattern_with_folders_must_account_for_every_level():
+    pattern = "%artist%/%album%/%title%"
+    assert parse(pattern, "Band/LP/Song.mp3") == {"artist": "Band", "album": "LP", "title": "Song"}
+    assert parse(pattern, "Band/LP/Disc 1/Song.mp3") is None  # one level too deep: no guessing
+
+
+def test_a_pattern_without_folders_reads_the_file_name_wherever_the_file_is():
+    assert parse("%artist% - %title%", "Band/LP/Disc 1/X - Y.mp3") == {"artist": "X", "title": "Y"}
+    assert parse("%artist% - %title%", "X - Y.mp3") == {"artist": "X", "title": "Y"}
 
 
 def test_backslash_also_separates_folders_and_literal_folder_names_must_match():
-    assert parse("Music\\%artist%\\%title%", "/x/Music/Band/Song.mp3") == {
+    assert parse("Music\\%artist%\\%title%", "Music/Band/Song.mp3") == {
         "artist": "Band",
         "title": "Song",
     }
-    assert parse("Music/%artist%/%title%", "/x/Other/Band/Song.mp3") is None
+    assert parse("Music/%artist%/%title%", "Other/Band/Song.mp3") is None
 
 
 def test_same_field_in_two_folder_levels_must_agree():
-    assert parse("%artist%/%artist% - %title%", "/m/X/X - T.mp3") == {"artist": "X", "title": "T"}
-    assert parse("%artist%/%artist% - %title%", "/m/X/Y - T.mp3") is None
+    assert parse("%artist%/%artist% - %title%", "X/X - T.mp3") == {"artist": "X", "title": "T"}
+    assert parse("%artist%/%artist% - %title%", "X/Y - T.mp3") is None
+
+
+def test_relative_path_is_taken_below_the_base_or_falls_back_to_the_name():
+    assert relative_path(Path("/m/Band/LP/a.mp3"), Path("/m")) == Path("Band/LP/a.mp3")
+    assert relative_path(Path("/m/a.mp3"), Path("/m")) == Path("a.mp3")
+    assert relative_path(Path("/elsewhere/a.mp3"), Path("/m")) == Path("a.mp3")
+    assert relative_path(Path("/m/Band/a.mp3"), None) == Path("a.mp3")
 
 
 def test_parse_paths_returns_a_result_per_path_in_order():
     paths = [Path("/m/A - 1.mp3"), Path("/m/bad.mp3"), Path("/m/B - 2.mp3")]
-    result = parse_paths(paths, "%artist% - %title%")
+    result = parse_paths(paths, "%artist% - %title%", Path("/m"))
     assert [r for _, r in result] == [
         {"artist": "A", "title": "1"},
         None,
         {"artist": "B", "title": "2"},
     ]
+
+
+def test_parse_paths_reads_folders_relative_to_the_base():
+    paths = [Path("/lib/Band/LP/01 - Song.mp3"), Path("/lib/Band/01 - Loose.mp3")]
+    result = parse_paths(paths, "%artist%/%album%/%track% - %title%", Path("/lib"))
+    assert result[0][1] == {"artist": "Band", "album": "LP", "track": "01", "title": "Song"}
+    assert result[1][1] is None  # only one folder below the open folder
+    # Opened one level deeper, the same files read differently: the base decides.
+    deeper = parse_paths([paths[0]], "%album%/%track% - %title%", Path("/lib/Band"))
+    assert deeper[0][1] == {"album": "LP", "track": "01", "title": "Song"}
 
 
 @pytest.mark.parametrize(
@@ -169,12 +200,72 @@ def test_file_names_replace_illegal_characters_in_values_only():
     assert fmt("%title%", tags, filename=False).text == 'AC/DC: "Live"?'
 
 
-def test_file_names_cannot_contain_folder_separators_in_the_pattern():
-    with pytest.raises(PatternError, match="cannot contain"):
-        compile_format("%artist%/%title%", for_filename=True)
-    with pytest.raises(PatternError, match="cannot contain"):
-        compile_format("%artist%\\%title%", for_filename=True)
-    compile_format("%artist%/%title%", for_filename=False)  # fine for tag values
+def test_folders_in_a_file_name_pattern_give_one_part_per_level():
+    tags = TagSet(artist="The Beatles", album="Help", track="3/12", title="Help!")
+    result = fmt("%artist%/%album%/%track:2% - %title%", tags, filename=True)
+    assert result.parts == ("The Beatles", "Help", "03 - Help!")
+    assert result.text == "The Beatles/Help/03 - Help!"
+    assert fmt("%artist% - %title%", tags, filename=True).parts == ("The Beatles - Help!",)
+
+
+def test_backslash_also_separates_levels_when_writing_file_names():
+    tags = TagSet(artist="A", title="T")
+    assert fmt("%artist%\\%title%", tags, filename=True).parts == ("A", "T")
+
+
+def test_a_slash_inside_a_value_never_creates_a_level():
+    tags = TagSet(artist="AC/DC", album="Back\\In Black", title="T")
+    result = fmt("%artist%/%album%/%title%", tags, filename=True)
+    assert result.parts == ("AC_DC", "Back_In Black", "T")
+
+
+def test_tag_values_cannot_climb_out_of_the_folder():
+    tags = TagSet(artist="..", album=".", title="T")
+    with pytest.raises(PatternError, match="folder name would be empty"):
+        fmt("%artist%/%title%", tags, filename=True)
+    with pytest.raises(PatternError, match="folder name would be empty"):
+        fmt("%album%/%title%", tags, filename=True)
+
+
+def test_every_level_is_trimmed_and_never_hidden():
+    tags = TagSet(artist=" X. ", album=".hidden", title="T")
+    assert fmt("%artist%/%album%/%title%", tags, filename=True).parts == ("X", "_hidden", "T")
+
+
+def test_an_empty_level_is_an_error_naming_what_is_missing():
+    tags = TagSet(artist="A", title="T")  # no album
+    with pytest.raises(PatternError, match="A folder name would be empty"):
+        fmt("%artist%/%album%/%title%", tags, filename=True)
+    with pytest.raises(PatternError, match="The file name would be empty"):
+        fmt("%artist%/%album%", tags, filename=True)
+
+
+def test_overlong_folder_names_are_refused():
+    with pytest.raises(PatternError, match="folder name would be too long"):
+        fmt("%album%/%title%", TagSet(album="x" * 300, title="T"), filename=True)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "message"),
+    [
+        ("../%title%", r"cannot be \. or \.\."),
+        ("./%title%", r"cannot be \. or \.\."),
+        ("%artist%/../%title%", r"cannot be \. or \.\."),
+        ("/%title%", "is empty"),
+        ("%title%/", "is empty"),
+        ("%artist%//%title%", "is empty"),
+    ],
+)
+def test_invalid_folder_patterns_are_refused_up_front(pattern, message):
+    with pytest.raises(PatternError, match=message):
+        compile_format(pattern, for_filename=True)
+
+
+def test_folders_are_not_special_when_building_other_tag_values():
+    tags = TagSet(artist="A", title="T")
+    result = fmt("%artist%/%title%", tags, filename=False)
+    assert result.parts == ("A/T",) and result.text == "A/T"
+    compile_format("../%title%")  # nothing to guard: it is only text
 
 
 def test_file_names_are_trimmed_and_never_hidden():

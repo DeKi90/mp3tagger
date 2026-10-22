@@ -26,6 +26,18 @@ class Sandbox:
             raise PathOutsideRootsError(f"{path} is outside the allowed music roots")
         return resolved
 
+    def contains(self, path: str | Path) -> bool:
+        """Whether `path` lies within a root, also if it does not exist yet: the nearest
+        existing ancestor is resolved (following symlinks) and must be inside."""
+        existing = Path(path).expanduser()
+        while not existing.exists() and existing != existing.parent:
+            existing = existing.parent
+        try:
+            self.resolve(existing)
+        except PathOutsideRootsError:
+            return False
+        return True
+
     def list_dir(self, path: str | Path) -> Directory:
         folder = self.resolve(path)
         if not folder.is_dir():

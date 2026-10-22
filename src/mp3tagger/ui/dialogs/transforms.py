@@ -18,6 +18,7 @@ from mp3tagger.core.transforms import (
 from mp3tagger.ui.dialogs.parts import (
     FIELD_LABELS,
     column,
+    display_name,
     fields_select,
     footer,
     note,
@@ -42,11 +43,21 @@ CHANGE_COLUMNS = [
 
 
 def _show_changes(
-    table: ui.table, summary: ui.label, apply: ui.button, changes: list[FieldChange], files: int
+    table: ui.table,
+    summary: ui.label,
+    apply: ui.button,
+    changes: list[FieldChange],
+    files: int,
+    base: Path | None,
 ) -> None:
     """Fill the preview with one row per changed value and update the summary/apply button."""
     rows = [
-        {"file": c.path.name, "field": FIELD_LABELS[c.field], "old": c.old, "new": c.new}
+        {
+            "file": display_name(c.path, base),
+            "field": FIELD_LABELS[c.field],
+            "old": c.old,
+            "new": c.new,
+        }
         for c in changes
     ]
     show_rows(table, CHANGE_COLUMNS, rows)
@@ -57,7 +68,7 @@ def _show_changes(
 
 
 async def change_case(
-    items: Sequence[tuple[Path, TagSet]],
+    items: Sequence[tuple[Path, TagSet]], base: Path | None
 ) -> dict[Path, dict[str, str]] | None:
     """Change the case of chosen fields. Returns {path: {field: new value}}."""
     result: dict[Path, dict[str, str]] = {}
@@ -83,7 +94,7 @@ async def change_case(
         )
         result.clear()
         result.update(changes_by_path(changes))
-        _show_changes(table, summary, apply, changes, len(items))
+        _show_changes(table, summary, apply, changes, len(items), base)
 
     for control in (fields, style, small):
         control.on_value_change(refresh)
@@ -93,7 +104,7 @@ async def change_case(
 
 
 async def find_replace(
-    items: Sequence[tuple[Path, TagSet]],
+    items: Sequence[tuple[Path, TagSet]], base: Path | None
 ) -> dict[Path, dict[str, str]] | None:
     """Find and replace in chosen fields. Returns {path: {field: new value}}."""
     result: dict[Path, dict[str, str]] = {}
@@ -136,7 +147,7 @@ async def find_replace(
             return
         error.text = ""
         result.update(changes_by_path(changes))
-        _show_changes(table, summary, apply, changes, len(items))
+        _show_changes(table, summary, apply, changes, len(items), base)
 
     for control in (fields, find, replace, regex, match_case, whole):
         control.on_value_change(refresh)

@@ -2,6 +2,7 @@
 
 import base64
 from collections.abc import Sequence
+from pathlib import Path
 
 from nicegui import ui
 
@@ -80,3 +81,20 @@ def fields_select(default: list[str]) -> ui.select:
 def data_url(cover: CoverArt) -> str:
     """The image as a data: URL, so the browser needs no further request to show it."""
     return f"data:{cover.mime};base64,{base64.b64encode(cover.data).decode()}"
+
+
+def display_name(path: Path, base: Path | None) -> str:
+    """How a file is shown in a dialog: its path below the open folder, so that files with the
+    same name in different folders can be told apart."""
+    if base is not None:
+        try:
+            return path.relative_to(base).as_posix()
+        except ValueError:
+            pass
+    return path.name
+
+
+def display_folder(path: Path, base: Path | None) -> str:
+    """The folder of a file below the open folder ("" for the open folder itself)."""
+    name = display_name(path, base)
+    return name.rpartition("/")[0]

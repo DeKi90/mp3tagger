@@ -1,7 +1,7 @@
 """Dialogs of the converters. Each one shows a live preview and returns its result only when
 the user confirms; applying it is up to the caller."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from nicegui import ui
@@ -13,11 +13,14 @@ from mp3tagger.core.patterns import (
     compile_parse_pattern,
     format_values,
     parse_path,
+    relative_path,
 )
 from mp3tagger.core.rename import RenamePlan, plan_renames
 from mp3tagger.ui.dialogs.parts import (
     FIELD_LABELS,
     column,
+    display_folder,
+    display_name,
     footer,
     note,
     pattern_input,
@@ -27,15 +30,18 @@ from mp3tagger.ui.dialogs.parts import (
 )
 
 
-async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | None:
-    """Read tags from file names. Returns {path: {field: value}} for the files that match."""
+async def filename_to_tag(
+    paths: Sequence[Path], base: Path | None
+) -> dict[Path, dict[str, str]] | None:
+    """Read tags from file names, relative to the open folder `base`. Returns
+    {path: {field: value}} for the files that match."""
     result: dict[Path, dict[str, str]] = {}
     with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
         ui.label("Filename → Tag").classes("text-h6")
         pattern = pattern_input("%artist% - %title%")
         ui.label(
-            "Use / to read folder names too, e.g. %artist%/%album%/%track% - %title%. "
-            "%ignore% skips a part."
+            "Without / only the file name is read. With / the folders below the open folder are "
+            "read too, every level: %artist%/%album%/%track% - %title%. %ignore% skips a part."
         ).classes("text-caption text-grey")
         error = ui.label().classes("text-negative")
         summary = ui.label().classes("text-caption")
@@ -52,13 +58,13 @@ async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] |
             apply.set_enabled(False)
             return
         error.text = ""
-        parsed = [(path, parse_path(compiled, path)) for path in paths]
+        parsed = [(path, parse_path(compiled, relative_path(path, base))) for path in paths]
         result.update({path: values for path, values in parsed if values is not None})
         columns = [column("file", "File"), *(column(f, FIELD_LABELS[f]) for f in compiled.fields)]
         columns.append(column("match", ""))
         rows = [
             {
-                "file": path.name,
+                "file": display_name(path, base),
                 **{f: (values or {}).get(f, "") for f in compiled.fields},
                 "match": "" if values is not None else "no match",
             }
@@ -75,15 +81,23 @@ async def filename_to_tag(paths: Sequence[Path]) -> dict[Path, dict[str, str]] |
     return await run_dialog(dialog)  # type: ignore[return-value]
 
 
-async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePlan] | None:
-    """Rename files from their tags. Returns the plans (only "rename" ones will be applied)."""
+async def tag_to_filename(
+    items: Sequence[tuple[Path, TagSet]],
+    base: Path | None,
+    allowed: Callable[[Path], bool] | None = None,
+) -> list[RenamePlan] | None:
+    """Rename files from their tags, and sort them into folders below the open folder `base` if
+    the pattern has any. Returns the plans (only "rename" ones will be applied)."""
     plans: list[RenamePlan] = []
     with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
         ui.label("Tag → Filename").classes("text-h6")
         pattern = pattern_input("%track:2% - %title%")
         ui.label(
-            "The extension is kept and files stay in their folder. Illegal characters in tag "
-            "values are replaced by _. Files are renamed on disk as soon as you apply."
+            "The extension is kept. Without / the files stay in their folder; with / they are "
+            "sorted into folders below the open folder, which are created as needed, e.g. "
+            "%artist%/%album%/%track:2% - %title%. Folders left empty are removed. Illegal "
+            "characters in tag values are replaced by _. Files are moved on disk as soon as "
+            "you apply."
         ).classes("text-caption text-grey")
         error = ui.label().classes("text-negative")
         summary = ui.label().classes("text-caption")
@@ -93,7 +107,7 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
     def refresh() -> None:
         plans.clear()
         try:
-            plans.extend(plan_renames(items, pattern.value or ""))
+            plans.extend(plan_renames(items, pattern.value or "", base, allowed))
         except PatternError as exc:
             error.text, summary.text = str(exc), ""
             show_rows(table, [], [])
@@ -106,8 +120,8 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
             labels = {"unchanged": "unchanged", "rename": plan.message, "error": plan.message}
             rows.append(
                 {
-                    "old": plan.source.name,
-                    "new": plan.target.name if plan.target else "—",
+                    "old": display_name(plan.source, base),
+                    "new": display_name(plan.target, base) if plan.target else "—",
                     "note": ("⚠ " if plan.status == "error" else "") + labels[plan.status],
                 }
             )
@@ -130,7 +144,9 @@ async def tag_to_filename(items: Sequence[tuple[Path, TagSet]]) -> list[RenamePl
     return await run_dialog(dialog)  # type: ignore[return-value]
 
 
-async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[str, str]] | None:
+async def tag_to_tag(
+    items: Sequence[tuple[Path, TagSet]], base: Path | None
+) -> dict[Path, dict[str, str]] | None:
     """Fill one field from a format of other fields. Returns {path: {field: new value}}."""
     result: dict[Path, dict[str, str]] = {}
     with ui.dialog() as dialog, ui.card().classes("w-[56rem] max-w-full"):
@@ -160,7 +176,7 @@ async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[st
             current = getattr(tags, field)
             changed += current != new.text
             result[path] = {field: new.text}
-            rows.append({"file": path.name, "current": current, "new": new.text})
+            rows.append({"file": display_name(path, base), "current": current, "new": new.text})
         columns = [
             column("file", "File"),
             column("current", f"{FIELD_LABELS[field]} now"),
@@ -179,7 +195,9 @@ async def tag_to_tag(items: Sequence[tuple[Path, TagSet]]) -> dict[Path, dict[st
     return await run_dialog(dialog)  # type: ignore[return-value]
 
 
-async def auto_number(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | None:
+async def auto_number(
+    paths: Sequence[Path], base: Path | None
+) -> dict[Path, dict[str, str]] | None:
     """Number the files in the given order. Returns {path: {"track": value}}."""
     result: dict[Path, dict[str, str]] = {}
     with ui.dialog() as dialog, ui.card().classes("w-[40rem] max-w-full"):
@@ -209,7 +227,9 @@ async def auto_number(paths: Sequence[Path]) -> dict[Path, dict[str, str]] | Non
         )
         result.clear()
         result.update({path: {"track": value} for path, value in numbers.items()})
-        rows = [{"file": p.name, "folder": p.parent.name, "track": numbers[p]} for p in paths]
+        rows = [
+            {"file": p.name, "folder": display_folder(p, base), "track": numbers[p]} for p in paths
+        ]
         columns = [column("file", "File"), column("folder", "Folder"), column("track", "Track")]
         show_rows(table, columns, rows)
         summary.text = f"{len(paths)} files{note(len(rows))}"

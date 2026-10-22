@@ -30,6 +30,7 @@ from mp3tagger.ui.dialogs.parts import (
     FIELD_LABELS,
     column,
     data_url,
+    display_name,
     footer,
     preview_table,
     show_rows,
@@ -73,8 +74,10 @@ class LookupDialog:
         scan: DiscScan,
         artist: str,
         album: str,
+        base: Path | None = None,
     ) -> None:
         self._client, self._covers, self._files, self._scan = client, covers, files, scan
+        self._base = base
         self._candidates: list[CoverCandidate] = []
         self._chosen: int | None = None  # index into _candidates
         self._cards: list[ui.card] = []
@@ -415,7 +418,7 @@ class LookupDialog:
             rows.append(
                 {
                     "n": m.track.position if m.track else "",
-                    "file": m.file.path.name if m.file else "—",
+                    "file": display_name(m.file.path, self._base) if m.file else "—",
                     "title": m.track.title if m.track else "—",
                     "length": f"{_minutes(m.file.seconds) if m.file else '—'} / "
                     f"{_minutes(m.track.seconds) if m.track else '—'}",
@@ -469,9 +472,10 @@ async def lookup_dialog(
     scan: DiscScan,
     artist: str,
     album: str,
+    base: Path | None = None,
 ) -> LookupResult | None:
     """Open the lookup dialog. Returns what the user confirmed, or None if cancelled."""
-    dialog = LookupDialog(client, covers, files, scan, artist, album)
+    dialog = LookupDialog(client, covers, files, scan, artist, album, base)
     ui.timer(0, dialog.start, once=True)
     result = await dialog.dialog
     dialog.dialog.delete()

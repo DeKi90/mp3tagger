@@ -58,3 +58,24 @@ def test_list_dir_skips_escaping_symlinks_and_has_parent(sandbox):
 def test_list_dir_on_file_raises(sandbox):
     with pytest.raises(NotADirectoryError):
         sandbox.list_dir(sandbox.roots[0] / "file.txt")
+
+
+def test_contains_accepts_paths_inside_a_root_even_if_they_do_not_exist_yet(sandbox):
+    root = sandbox.roots[0]
+    assert sandbox.contains(root)
+    assert sandbox.contains(root / "rock")
+    assert sandbox.contains(root / "new" / "deeper" / "file.mp3")
+
+
+def test_contains_rejects_paths_outside_the_roots(sandbox):
+    root = sandbox.roots[0]
+    assert not sandbox.contains(root.parent / "secret")
+    assert not sandbox.contains(root.parent / "never" / "existed")
+    assert not sandbox.contains(root / ".." / "secret")
+
+
+def test_contains_follows_symlinks_that_leave_the_root(sandbox):
+    root = sandbox.roots[0]
+    (root / "link").symlink_to(root.parent / "secret")
+    assert not sandbox.contains(root / "link")
+    assert not sandbox.contains(root / "link" / "new" / "file.mp3")  # would be created outside

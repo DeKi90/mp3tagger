@@ -14,7 +14,7 @@ from mp3tagger.core.library import load_covers, scan_folder
 from mp3tagger.core.lookup import LocalFile, scan_discs
 from mp3tagger.core.models import UNCHANGED, CoverArt, MoveCoverToFolder, TagSet
 from mp3tagger.core.musicbrainz import MusicBrainz
-from mp3tagger.core.rename import RenameError, apply_renames
+from mp3tagger.core.rename import RenameError, apply_renames, remove_empty_folders
 from mp3tagger.core.saving import find_folder_cover_conflicts, write_changes
 from mp3tagger.core.tagio.base import SaveOptions
 from mp3tagger.core.tagio.id3 import Id3Reader, Id3Writer
@@ -151,6 +151,7 @@ def build_app(
                 buffer.effective_tags(path),
                 buffer.is_dirty(path),
                 buffer.effective_has_cover(path),
+                folder,
             )
 
         def refresh_rows(paths: list[Path]) -> None:
@@ -306,7 +307,13 @@ def build_app(
             ]
             first = tags[editable[0]]
             result = await lookup_dialog(
-                musicbrainz_client(), itunes_client(), files, scan, first.artist, first.album
+                musicbrainz_client(),
+                itunes_client(),
+                files,
+                scan,
+                first.artist,
+                first.album,
+                folder,
             )
             if result is None:
                 return
@@ -328,22 +335,22 @@ def build_app(
                 ui.notify(f"{what}: {len(changed)} file(s) modified. Save to write them.")
 
         async def convert_filename_to_tag() -> None:
-            changes = await converters.filename_to_tag(editable_paths())
+            changes = await converters.filename_to_tag(editable_paths(), folder)
             if changes:
                 after_bulk_edit(buffer.set_fields(changes), "Filename → Tag")
 
         async def convert_tag_to_tag() -> None:
-            changes = await converters.tag_to_tag(tags_of(editable_paths()))
+            changes = await converters.tag_to_tag(tags_of(editable_paths()), folder)
             if changes:
                 after_bulk_edit(buffer.set_fields(changes), "Tag → Tag")
 
         async def convert_case() -> None:
-            changes = await transforms.change_case(tags_of(editable_paths()))
+            changes = await transforms.change_case(tags_of(editable_paths()), folder)
             if changes:
                 after_bulk_edit(buffer.set_fields(changes), "Change case")
 
         async def convert_find_replace() -> None:
-            changes = await transforms.find_replace(tags_of(editable_paths()))
+            changes = await transforms.find_replace(tags_of(editable_paths()), folder)
             if changes:
                 after_bulk_edit(buffer.set_fields(changes), "Find and replace")
 
@@ -351,24 +358,34 @@ def build_app(
             wanted = set(editable_paths())
             shown = await grid.displayed_paths()  # sorted/filtered the way the user sees it
             ordered = [p for p in shown if p in wanted] or editable_paths()
-            changes = await converters.auto_number(ordered)
+            changes = await converters.auto_number(ordered, folder)
             if changes:
                 after_bulk_edit(buffer.set_fields(changes), "Auto-number")
 
         async def convert_tag_to_filename() -> None:
-            plans = await converters.tag_to_filename(tags_of(editable_paths()))
+            plans = await converters.tag_to_filename(
+                tags_of(editable_paths()), folder, sandbox.contains
+            )
             if plans is None:
                 return
             set_busy(True)  # the paths change under the buffer; nothing may be edited meanwhile
             try:
                 mapping = await run.io_bound(apply_renames, plans)
+                # Folders that files were moved out of may now be empty; tidy them up.
+                emptied = {old.parent for old in mapping}
+                removed = (
+                    await run.io_bound(remove_empty_folders, emptied, folder) if folder else []
+                )
             except RenameError as exc:
                 ui.notify(str(exc), type="negative", close_button=True)
                 return
             finally:
                 set_busy(False)
             follow_renames(mapping)
-            ui.notify(f"Renamed {len(mapping)} file(s)", type="positive")
+            message = f"Renamed {len(mapping)} file(s)"
+            if removed:
+                message += f", removed {len(removed)} empty folder(s)"
+            ui.notify(message, type="positive")
 
         def follow_renames(mapping: dict[Path, Path]) -> None:
             """Make the state follow files that were renamed on disk."""
@@ -379,6 +396,7 @@ def build_app(
             cached = {mapping.get(p, p): cover for p, cover in covers.items()}
             covers.clear()
             covers.update(cached)
+            folder_covers.clear()  # files changed folders
             selected = [mapping.get(p, p) for p in selected]
             grid.set_rows([row(p) for p in buffer.paths])  # replacing rows clears the selection
             grid.select_paths(selected)

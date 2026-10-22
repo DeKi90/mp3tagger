@@ -11,8 +11,8 @@ Python based (web) GUI to manipulate ID3 audio file tags.
 - [x] Support for ID3v1, ID3v2.3 and ID3v2.4 tags, including conversion between versions
 - [x] Standard fields: title, artist, album, album artist, year, track, disc number, genre, comment, composer
 - [x] Cover art: view, add, replace, extract and remove embedded images
-- [x] Filename → Tag: derive tags from filename patterns (e.g. `%artist% - %title%`)
-- [x] Tag → Filename: rename files from tags using a format string
+- [x] Filename → Tag: derive tags from filename patterns (e.g. `%artist% - %title%`); patterns with `/` also read the folders below the opened folder
+- [x] Tag → Filename: rename files from tags using a format string; with `/` in the pattern (e.g. `%artist%/%album%/%track:2% - %title%`) files are sorted into folders below the opened folder
 - [x] Tag → Tag: copy values between fields
 - [x] Auto-numbering of tracks
 - [x] Case conversion (upper, lower, title case, sentence case)

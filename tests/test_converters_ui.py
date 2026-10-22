@@ -220,7 +220,7 @@ async def test_rename_warns_about_empty_fields_but_allows_it(user: User, editing
 async def test_rename_pattern_with_a_folder_separator_is_refused(user: User, editing, music_root):
     await choose(user, "Tag → Filename…")
     type_into(user, "Pattern", "../%title%")
-    await user.should_see("cannot contain")
+    await user.should_see("A folder name cannot be . or ..")
     assert not button(user, "Rename").enabled
     assert editing.exists()
 
@@ -347,3 +347,184 @@ async def test_auto_number_ignores_unselected_files(user: User, music_root, monk
     monkeypatch.setattr(FileGrid, "displayed_paths", displayed)
     await choose(user, "Auto-number tracks…")
     assert [r["file"] for r in table_rows(user)] == ["b.mp3"]
+
+
+# --- sorting into folders --------------------------------------------------------------------
+
+
+async def test_a_folder_pattern_sorts_files_into_folders_below_the_open_folder(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock")
+    a, b = rock / "a.mp3", rock / "b.mp3"
+    await select(user, monkeypatch, a, b)
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "%artist%/%year%/%track:2% - %title%")
+    assert table_rows(user) == [
+        {"old": "a.mp3", "new": "Band/2000/01 - Alpha.mp3", "note": ""},
+        {"old": "b.mp3", "new": "Band/2001/02 - Beta.mp3", "note": ""},
+    ]  # paths below the open folder
+    assert not (rock / "Band").exists()  # preview only
+    await click(user, "Rename 2")
+    await user.should_see("Renamed 2 file(s)")
+    assert (rock / "Band" / "2000" / "01 - Alpha.mp3").exists()
+    assert (rock / "Band" / "2001" / "02 - Beta.mp3").exists()
+    assert not a.exists() and not b.exists()
+    moved = rock / "Band" / "2000" / "01 - Alpha.mp3"
+    assert row_for(user, moved)["path"] == "Band/2000"  # the Folder column, below the open folder
+    assert ID3(moved)["TIT2"].text == ["Alpha"]  # the content moved with the file
+
+
+async def test_the_selection_and_pending_edits_survive_a_move_into_folders(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "a.mp3")
+    type_into(user, "Title", "Edited")
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "%artist%/%title%")
+    assert table_rows(user)[0]["new"] == "Band/Edited.mp3"  # from the unsaved edit
+    await click(user, "Rename 1")
+    await user.should_see("Renamed 1 file(s)")
+    new = rock / "Band" / "Edited.mp3"
+    assert row_for(user, new)["dirty"] is True
+    await user.should_see("Edited.mp3")  # the panel still shows the selected file
+    await click(user, "Save")
+    await user.should_see("Saved 1 file(s)")
+    assert ID3(new)["TIT2"].text == ["Edited"]
+
+
+async def test_folders_left_empty_by_the_move_are_removed(user: User, music_root, monkeypatch):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock", recursive=True)
+    c = rock / "deep" / "c.mp3"
+    await select(user, monkeypatch, c)
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "Sorted/%title%")
+    assert table_rows(user)[0]["old"] == "deep/c.mp3"  # nested files show their folder
+    assert table_rows(user)[0]["new"] == "Sorted/Gamma.mp3"
+    await click(user, "Rename 1")
+    await user.should_see("removed 1 empty folder(s)")
+    assert (rock / "Sorted" / "Gamma.mp3").exists() and not (rock / "deep").exists()
+    assert (rock / "a.mp3").exists()  # the rest of the open folder is untouched
+
+
+async def test_a_pattern_without_folders_renames_in_place_even_in_subfolders(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock", recursive=True)
+    await select(user, monkeypatch, rock / "deep" / "c.mp3")
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "%title%")
+    assert table_rows(user)[0]["new"] == "deep/Gamma.mp3"  # still in deep/
+    await click(user, "Rename 1")
+    await user.should_see("Renamed 1 file(s)")
+    assert (rock / "deep" / "Gamma.mp3").exists() and not (rock / "Gamma.mp3").exists()
+
+
+async def test_a_missing_tag_for_a_folder_blocks_just_that_file(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock", recursive=True)
+    await select(user, monkeypatch, rock / "a.mp3", rock / "deep" / "c.mp3")  # c has no artist
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "%artist%/%title%")
+    rows = {r["old"]: r for r in table_rows(user)}
+    assert rows["a.mp3"]["new"] == "Band/Alpha.mp3" and rows["a.mp3"]["note"] == ""
+    assert "A folder name would be empty" in rows["deep/c.mp3"]["note"]
+    await user.should_see("1 to rename, 0 unchanged, 1 with problems")
+    await click(user, "Rename 1")
+    await user.should_see("Renamed 1 file(s)")
+    assert (rock / "Band" / "Alpha.mp3").exists() and (rock / "deep" / "c.mp3").exists()
+
+
+async def test_a_file_where_a_folder_should_go_is_reported(
+    user: User, make_mp3, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    (rock / "Band").write_bytes(b"a file, not a folder")
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "a.mp3")
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "%artist%/%title%")
+    assert "Band is a file, not a folder" in table_rows(user)[0]["note"]
+    assert not button(user, "Rename").enabled
+
+
+async def test_a_folder_pattern_needs_no_slash_tricks_to_stay_inside(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    await open_folder(user, music_root, "rock")
+    await select(user, monkeypatch, rock / "a.mp3")
+    type_into(user, "Title", "../../escape")
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", "%artist%/%title%")
+    assert table_rows(user)[0]["new"] == "Band/_._.._escape.mp3"  # separators in values are tamed
+    await click(user, "Rename 1")
+    await user.should_see("Renamed 1 file(s)")
+    assert (rock / "Band" / "_._.._escape.mp3").exists()
+    assert not (music_root / "escape.mp3").exists()
+
+
+# --- reading tags from paths below the open folder -------------------------------------------
+
+
+async def test_filename_to_tag_shows_and_reads_the_path_below_the_open_folder(
+    user: User, make_mp3, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    track = make_mp3(rock / "Band" / "LP" / "07 - Song.mp3")
+    await open_folder(user, music_root, "rock", recursive=True)
+    await select(user, monkeypatch, track)
+    await choose(user, "Filename → Tag…")
+    type_into(user, "Pattern", "%artist%/%album%/%track% - %title%")
+    (row,) = table_rows(user)
+    assert row["file"] == "Band/LP/07 - Song.mp3"  # the relative path, not just the name
+    assert (row["artist"], row["album"], row["track"], row["title"]) == ("Band", "LP", "07", "Song")
+    await click(user, "Apply to 1")
+    assert (row_for(user, track)["artist"], row_for(user, track)["album"]) == ("Band", "LP")
+
+
+async def test_a_folder_pattern_must_fit_the_depth_below_the_open_folder(
+    user: User, make_mp3, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    deep = make_mp3(rock / "Band" / "LP" / "Disc 1" / "07 - Song.mp3")
+    await open_folder(user, music_root, "rock", recursive=True)
+    await select(user, monkeypatch, deep)
+    await choose(user, "Filename → Tag…")
+    type_into(user, "Pattern", "%artist%/%album%/%title%")  # one level short: no guessing
+    assert table_rows(user)[0]["match"] == "no match"
+    type_into(user, "Pattern", "%track% - %title%")  # the file name alone matches at any depth
+    assert table_rows(user)[0]["title"] == "Song"
+
+
+async def test_the_same_pattern_reads_back_what_the_rename_wrote(
+    user: User, music_root, monkeypatch
+):
+    rock = music_root / "rock"
+    pattern = "%artist%/%year%/%track:2% - %title%"
+    await open_folder(user, music_root, "rock")
+    a = rock / "a.mp3"
+    await select(user, monkeypatch, a)
+    await choose(user, "Tag → Filename…")
+    type_into(user, "Pattern", pattern)
+    await click(user, "Rename 1")
+    await user.should_see("Renamed 1 file(s)")
+    moved = rock / "Band" / "2000" / "01 - Alpha.mp3"
+    await choose(user, "Filename → Tag…")
+    type_into(user, "Pattern", "%artist%/%year%/%track% - %title%")
+    (row,) = table_rows(user)
+    assert (row["file"], row["artist"], row["year"], row["track"], row["title"]) == (
+        "Band/2000/01 - Alpha.mp3",
+        "Band",
+        "2000",
+        "01",
+        "Alpha",
+    )
+    assert moved.exists()
