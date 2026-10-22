@@ -1,10 +1,11 @@
 """Building blocks shared by the converter and transform dialogs."""
 
+import base64
 from collections.abc import Sequence
 
 from nicegui import ui
 
-from mp3tagger.core.models import FIELD_NAMES
+from mp3tagger.core.models import FIELD_NAMES, CoverArt
 
 MAX_PREVIEW_ROWS = 500  # the preview is a sample for checking the pattern, not a full listing
 
@@ -74,3 +75,8 @@ def fields_select(default: list[str]) -> ui.select:
     select = ui.select(FIELD_LABELS, multiple=True, value=default, label="Fields")
     select.props("outlined dense use-chips").classes("w-full")
     return select
+
+
+def data_url(cover: CoverArt) -> str:
+    """The image as a data: URL, so the browser needs no further request to show it."""
+    return f"data:{cover.mime};base64,{base64.b64encode(cover.data).decode()}"

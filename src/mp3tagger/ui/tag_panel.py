@@ -1,6 +1,5 @@
 """Editor for the tags of the selected file."""
 
-import base64
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import fields
@@ -10,6 +9,7 @@ from nicegui import ui
 from mp3tagger.core.batch import MergedCover, MergedTags
 from mp3tagger.core.images import MAX_COVER_BYTES, sniff_image
 from mp3tagger.core.models import FIELD_NAMES, YEAR_FORMATS, TagSet, Track, is_valid_year
+from mp3tagger.ui.dialogs.parts import data_url
 
 LABELS = {
     "title": "Title",
@@ -163,9 +163,7 @@ class TagPanel:
         else:
             shown = merged.shown
             assert shown is not None
-            image_src = (
-                f"data:{shown.cover.mime};base64,{base64.b64encode(shown.cover.data).decode()}"
-            )
+            image_src = data_url(shown.cover)
             caption, set_label = describe_cover(shown.cover.data), "Replace"
             if shown.folder_file:
                 caption += f" · folder image ({shown.folder_file})"

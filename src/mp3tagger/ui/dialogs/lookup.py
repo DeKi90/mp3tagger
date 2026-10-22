@@ -12,6 +12,8 @@ from typing import Literal
 
 from nicegui import ui
 
+from mp3tagger.core.http import ServiceError
+from mp3tagger.core.itunes import CoverCandidate, ITunes
 from mp3tagger.core.lookup import (
     IMPORT_FIELDS,
     LENGTH_TOLERANCE,
@@ -23,9 +25,20 @@ from mp3tagger.core.lookup import (
     plausible_for_toc,
 )
 from mp3tagger.core.models import CoverArt
-from mp3tagger.core.musicbrainz import Medium, MusicBrainz, MusicBrainzError, Release
-from mp3tagger.ui.dialogs.parts import FIELD_LABELS, column, footer, preview_table, show_rows
+from mp3tagger.core.musicbrainz import Medium, MusicBrainz, Release
+from mp3tagger.ui.dialogs.parts import (
+    FIELD_LABELS,
+    column,
+    data_url,
+    footer,
+    preview_table,
+    show_rows,
+)
 
+COVER_NONE = "none"
+COVER_ARCHIVE = "caa"
+COVER_ITUNES = "itunes"
+SELECTED_CARD = "outline: 3px solid var(--q-primary); outline-offset: -3px;"
 DEFAULT_FIELDS = ("title", "track", "album", "artist", "album_artist", "year")
 FOUND_BY = {"disc id": "CD identifier", "toc": "similar CD", "search": "search", "id": "selected"}
 Level = Literal["info", "ok", "warning", "error"]
@@ -55,12 +68,17 @@ class LookupDialog:
     def __init__(
         self,
         client: MusicBrainz,
+        covers: ITunes,
         files: list[LocalFile],
         scan: DiscScan,
         artist: str,
         album: str,
     ) -> None:
-        self._client, self._files, self._scan = client, files, scan
+        self._client, self._covers, self._files, self._scan = client, covers, files, scan
+        self._candidates: list[CoverCandidate] = []
+        self._chosen: int | None = None  # index into _candidates
+        self._cards: list[ui.card] = []
+        self._setting_cover_source = False
         self._releases: dict[str, Release] = {}
         self._release: Release | None = None
         self._medium: Medium | None = None
@@ -87,13 +105,22 @@ class LookupDialog:
                     name: ui.checkbox(FIELD_LABELS[name], value=name in DEFAULT_FIELDS)
                     for name in IMPORT_FIELDS
                 }
-                self._cover_box = ui.checkbox("Cover (Cover Art Archive)", value=True)
+            with ui.row().classes("w-full items-center gap-4"):
+                self._cover_source = (
+                    ui.select(
+                        {COVER_NONE: "Keep the files' covers"}, value=COVER_NONE, label="Cover"
+                    )
+                    .props("outlined dense")
+                    .classes("w-80")
+                )
+                self._cover_status = ui.label().classes("text-caption")
+            self._cover_strip = ui.row().classes("w-full gap-2")
             self._summary = ui.label().classes("text-caption")
             self._preview = preview_table()
             self._apply = footer(self.dialog, "Apply")
 
         self._apply.set_enabled(False)
-        self._cover_box.set_enabled(False)
+        self._cover_source.on_value_change(self._cover_source_changed)
         self._search_button.on_click(self.search)
         self._apply.on_click(self.apply)
         self._medium_select.on_value_change(self._medium_chosen)
@@ -141,6 +168,7 @@ class LookupDialog:
         self._releases_table.selected = []
         self._releases_table.update()
         self._release = self._medium = None
+        self._set_cover_options(None)
         self._refresh_preview()
 
     def _busy(self, busy: bool) -> None:
@@ -153,7 +181,7 @@ class LookupDialog:
         self._busy(True)
         try:
             await action()
-        except MusicBrainzError as exc:
+        except ServiceError as exc:
             if mine == self._request:
                 self._say(str(exc), "error")
         finally:
@@ -256,10 +284,7 @@ class LookupDialog:
         self._medium = chosen
         if multiple:
             self._medium_select.value = chosen.position
-        self._cover_box.set_enabled(release.has_front_cover)
-        self._cover_box.text = "Cover (Cover Art Archive)" + (
-            "" if release.has_front_cover else " – none available"
-        )
+        self._set_cover_options(release)
         self._refresh_preview()
 
     def _medium_chosen(self) -> None:
@@ -269,6 +294,89 @@ class LookupDialog:
             if medium.position == self._medium_select.value:
                 self._medium = medium
         self._refresh_preview()
+
+    # --- cover -------------------------------------------------------------------------------
+
+    def _set_cover_options(self, release: Release | None) -> None:
+        """Offer the cover sources that make sense for `release` and pick the best default: the
+        Cover Art Archive if it has one, else a search on iTunes."""
+        options = {COVER_NONE: "Keep the files' covers"}
+        default = COVER_NONE
+        if release is not None:
+            if release.has_front_cover:
+                options[COVER_ARCHIVE] = "Cover Art Archive (front cover)"
+                default = COVER_ARCHIVE
+            options[COVER_ITUNES] = "iTunes search (square covers)"
+            if default == COVER_NONE:
+                default = COVER_ITUNES
+        self._setting_cover_source = True
+        try:
+            self._cover_source.options = options
+            self._cover_source.update()
+            self._cover_source.value = default
+        finally:
+            self._setting_cover_source = False
+        self._cover_source_changed()
+
+    def _cover_source_changed(self) -> None:
+        if self._setting_cover_source:
+            return
+        self._clear_candidates()
+        source = self._cover_source.value
+        self._cover_status.text = ""
+        if source == COVER_ITUNES and self._release is not None:
+            self._cover_status.text = "Searching iTunes for covers…"
+            ui.timer(0, lambda: self._guarded(self._search_covers), once=True)
+        elif source == COVER_ARCHIVE:
+            self._cover_status.text = "The front cover of this release is used."
+
+    def _clear_candidates(self) -> None:
+        self._candidates, self._chosen, self._cards = [], None, []
+        self._cover_strip.clear()
+
+    async def _search_covers(self) -> None:
+        release = self._release
+        if release is None:
+            return
+        mine = self._request
+        candidates = await self._covers.search_covers(release.title, release.artist)
+        if mine != self._request or self._cover_source.value != COVER_ITUNES:
+            return
+        self._clear_candidates()
+        self._candidates = candidates
+        # Preselect the best title match; a result that merely looks similar is left to the user.
+        self._chosen = 0 if candidates and candidates[0].matches_title else None
+        with self._cover_strip:
+            for index, candidate in enumerate(candidates):
+                self._cards.append(self._candidate_card(index, candidate))
+        self._mark_chosen()
+
+    def _candidate_card(self, index: int, candidate: CoverCandidate) -> ui.card:
+        card = ui.card().tight().classes("w-36 cursor-pointer")
+        card.on("click", lambda: self._choose_cover(index))
+        with card:
+            ui.image(data_url(candidate.thumbnail)).classes("w-36 h-36")
+            ui.label(candidate.title).classes("text-caption px-1 ellipsis-2-lines")
+            by = " · ".join(part for part in (candidate.artist, candidate.year) if part)
+            ui.label(by).classes("text-caption text-grey px-1 ellipsis")
+        return card
+
+    def _choose_cover(self, index: int) -> None:
+        self._chosen = index
+        self._mark_chosen()
+
+    def _mark_chosen(self) -> None:
+        for index, card in enumerate(self._cards):
+            card.style(replace=SELECTED_CARD if index == self._chosen else "")
+        if not self._candidates:
+            self._cover_status.text = "iTunes has no square cover for this title."
+        elif self._chosen is None:
+            self._cover_status.text = (
+                "No result has exactly this title. Click a cover if one of them fits."
+            )
+        else:
+            chosen = self._candidates[self._chosen]
+            self._cover_status.text = f"Selected: {chosen.title}"
 
     # --- preview and apply -------------------------------------------------------------------
 
@@ -326,30 +434,44 @@ class LookupDialog:
         self._apply.set_enabled(paired > 0 and bool(self._fields()))
         self._apply.text = f"Apply to {paired} file(s)"
 
+    async def _load_cover(self, release: Release) -> CoverArt | None:
+        """The cover the user chose, or None. A failure is reported, not fatal: the tags still
+        go in."""
+        source = self._cover_source.value
+        if source == COVER_NONE or (source == COVER_ITUNES and self._chosen is None):
+            return None
+        self._busy(True)
+        self._apply.set_enabled(False)
+        self._say("Loading the cover…")
+        try:
+            if source == COVER_ARCHIVE:
+                return await self._client.front_cover(release)
+            return await self._covers.full_cover(self._candidates[self._chosen])
+        except ServiceError as exc:
+            ui.notify(f"The cover could not be loaded: {exc}", type="warning")
+            return None
+
     async def apply(self) -> None:
         release, medium = self._release, self._medium
         if release is None or medium is None:
             return
         matches = self._matches()
         changes = build_changes(matches, release, medium, self._fields())
-        cover = None
-        if self._cover_box.value and self._cover_box.enabled:
-            self._busy(True)
-            self._apply.set_enabled(False)
-            self._say("Loading the cover…")
-            try:
-                cover = await self._client.front_cover(release)
-            except MusicBrainzError as exc:
-                ui.notify(f"The cover could not be loaded: {exc}", type="warning")
+        cover = await self._load_cover(release)
         paired = tuple(m.file.path for m in matches if m.file and m.track)
         self.dialog.submit(LookupResult(changes, paired, cover))
 
 
 async def lookup_dialog(
-    client: MusicBrainz, files: list[LocalFile], scan: DiscScan, artist: str, album: str
+    client: MusicBrainz,
+    covers: ITunes,
+    files: list[LocalFile],
+    scan: DiscScan,
+    artist: str,
+    album: str,
 ) -> LookupResult | None:
     """Open the lookup dialog. Returns what the user confirmed, or None if cancelled."""
-    dialog = LookupDialog(client, files, scan, artist, album)
+    dialog = LookupDialog(client, covers, files, scan, artist, album)
     ui.timer(0, dialog.start, once=True)
     result = await dialog.dialog
     dialog.dialog.delete()

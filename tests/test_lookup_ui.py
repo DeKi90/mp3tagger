@@ -13,10 +13,11 @@ from nicegui.testing.user_interaction import UserInteraction
 
 from imagery import png
 from mp3tagger.config import Config
+from mp3tagger.core.itunes import CoverCandidate, ITunesError
 from mp3tagger.core.models import CoverArt
 from mp3tagger.core.musicbrainz import MusicBrainzError, Release, parse_release
 from mp3tagger.ui.app import build_app
-from uihelpers import button, click, open_folder, row_for, select
+from uihelpers import button, click, open_folder, row_for, select, select_named
 
 FIXTURES = Path(__file__).parent / "fixtures"
 KARLSSON_TOC = "6+96+926A+13B91+1A876+23885+2D8DB+34008".encode("utf-16-le") + b"\x00\x00"
@@ -83,6 +84,32 @@ class FakeMusicBrainz:
         return self.cover
 
 
+def candidate(
+    title: str, *, matches: bool = True, artist: str = "Astrid Lindgren"
+) -> CoverCandidate:
+    thumbnail = CoverArt(png(8, 8), "image/png")
+    return CoverCandidate(
+        title, artist, "2011", "audiobook", thumbnail, f"https://x/{title}/600x600bb.jpg", matches
+    )
+
+
+class FakeITunes:
+    def __init__(self, candidates=(), *, error=None, cover=COVER):
+        self.candidates, self.error, self.cover, self.calls = list(candidates), error, cover, []
+
+    async def search_covers(self, title, artist="", limit=6):
+        self.calls.append(("search", title, artist))
+        if self.error:
+            raise self.error
+        return list(self.candidates)
+
+    async def full_cover(self, chosen):
+        self.calls.append(("full", chosen.title))
+        if isinstance(self.cover, Exception):
+            raise self.cover
+        return self.cover
+
+
 def add_mcdi(path: Path, data: bytes) -> None:
     tags = ID3(path)
     tags.add(MCDI(data=data))
@@ -102,8 +129,10 @@ def cd(make_mp3, music_root):
     return paths
 
 
-async def open_lookup(user: User, music_root, monkeypatch, paths, fake, *, sub="cd") -> None:
-    build_app(Config(roots=(music_root,)), musicbrainz=fake)
+async def open_lookup(
+    user: User, music_root, monkeypatch, paths, fake, *, sub="cd", itunes=None
+) -> None:
+    build_app(Config(roots=(music_root,)), musicbrainz=fake, itunes=itunes or FakeITunes())
     await user.open("/")
     user.find("Open folder…").click()
     await asyncio.sleep(0.1)
@@ -132,6 +161,15 @@ def dialog_input(user: User, label: str) -> ui.input:
         for e in user.client.elements.values()
         if isinstance(e, ui.input) and e.props.get("label") == label
     ][-1]
+
+
+def cards(user: User) -> list[ui.card]:
+    """The clickable cover candidates of the dialog."""
+    return [
+        e
+        for e in user.client.elements.values()
+        if isinstance(e, ui.card) and "cursor-pointer" in e.classes
+    ]
 
 
 def checkbox(user: User, text: str) -> ui.checkbox:
@@ -239,7 +277,7 @@ async def test_only_the_chosen_fields_are_imported(user: User, music_root, cd, m
     await user.should_see("1 release(s) have exactly this CD identifier")
     for text in ("Title", "Artist", "Album artist", "Year"):
         checkbox(user, text).set_value(False)
-    checkbox(user, "Cover (Cover Art Archive)").set_value(False)
+    select_named(user, "Cover").set_value("none")
     await click(user, "Apply to 6")
     row = row_for(user, cd[0])
     assert (row["title"], row["track"], row["album"]) == ("Titelnummer 1", "1", "Karlsson vom Dach")
@@ -423,17 +461,144 @@ async def test_a_box_set_offers_the_discs_and_preselects_the_one_that_was_looked
     assert row_for(user, paths[0])["title"] == second.tracks[0].title
 
 
-async def test_a_release_without_cover_art_disables_the_cover_option(
+async def test_the_cover_source_defaults_to_the_archive_when_it_has_a_front_cover(
+    user: User, music_root, cd, monkeypatch
+):
+    itunes = FakeITunes()
+    fake = FakeMusicBrainz(by_disc=[fit_lengths(fixture_release())])
+    await open_lookup(user, music_root, monkeypatch, cd, fake, itunes=itunes)
+    await user.should_see("1 release(s) have exactly this CD identifier")
+    chooser = select_named(user, "Cover")
+    assert chooser.value == "caa"
+    assert list(chooser.options) == ["none", "caa", "itunes"]
+    assert itunes.calls == []  # nothing is sent to Apple while the archive has a cover
+
+
+async def test_without_an_archive_cover_iTunes_is_searched_with_the_release_title(
     user: User, music_root, cd, monkeypatch
 ):
     release = replace(fit_lengths(fixture_release()), has_front_cover=False)
+    itunes = FakeITunes([candidate("Karlsson vom Dach 1"), candidate("Karlsson vom Dach 2")])
     fake = FakeMusicBrainz(by_disc=[release])
-    await open_lookup(user, music_root, monkeypatch, cd, fake)
-    await user.should_see("none available")
-    box = checkbox(user, "Cover (Cover Art Archive) – none available")
-    assert not box.enabled
+    await open_lookup(user, music_root, monkeypatch, cd, fake, itunes=itunes)
+    await user.should_see("Selected: Karlsson vom Dach 1")
+    chooser = select_named(user, "Cover")
+    assert chooser.value == "itunes" and list(chooser.options) == ["none", "itunes"]
+    assert itunes.calls == [("search", "Karlsson vom Dach", "Astrid Lindgren")]
+    assert len(cards(user)) == 2
     await click(user, "Apply to 6")
-    assert not any(c[0] == "cover" for c in fake.calls)
+    assert ("full", "Karlsson vom Dach 1") in itunes.calls
+    assert row_for(user, cd[0])["cover"] == "✓"
+
+
+async def test_another_candidate_can_be_chosen_by_clicking_it(
+    user: User, music_root, cd, monkeypatch
+):
+    release = replace(fit_lengths(fixture_release()), has_front_cover=False)
+    itunes = FakeITunes([candidate("First"), candidate("Second"), candidate("Third")])
+    await open_lookup(
+        user, music_root, monkeypatch, cd, FakeMusicBrainz(by_disc=[release]), itunes=itunes
+    )
+    await user.should_see("Selected: First")
+    UserInteraction(user, {cards(user)[2]}, None).click()
+    await user.should_see("Selected: Third")
+    await click(user, "Apply to 6")
+    assert ("full", "Third") in itunes.calls and ("full", "First") not in itunes.calls
+
+
+async def test_nothing_is_preselected_when_no_result_has_the_title(
+    user: User, music_root, cd, monkeypatch
+):
+    release = replace(fit_lengths(fixture_release()), has_front_cover=False)
+    itunes = FakeITunes([candidate("Something else", matches=False)])
+    await open_lookup(
+        user, music_root, monkeypatch, cd, FakeMusicBrainz(by_disc=[release]), itunes=itunes
+    )
+    await user.should_see("No result has exactly this title")
+    await click(user, "Apply to 6")  # the tags go in; no cover was chosen, so none is set
+    assert not any(c[0] == "full" for c in itunes.calls)
+    assert row_for(user, cd[0])["cover"] == ""
+    assert row_for(user, cd[0])["title"] == "Karlsson vom Dach, Teil 1"
+
+
+async def test_no_square_cover_at_all_is_said_plainly(user: User, music_root, cd, monkeypatch):
+    release = replace(fit_lengths(fixture_release()), has_front_cover=False)
+    await open_lookup(user, music_root, monkeypatch, cd, FakeMusicBrainz(by_disc=[release]))
+    await user.should_see("iTunes has no square cover for this title")
+    assert cards(user) == []
+
+
+async def test_iTunes_can_be_chosen_even_when_the_archive_has_a_cover(
+    user: User, music_root, cd, monkeypatch
+):
+    itunes = FakeITunes([candidate("Karlsson vom Dach 1")])
+    fake = FakeMusicBrainz(by_disc=[fit_lengths(fixture_release())])
+    await open_lookup(user, music_root, monkeypatch, cd, fake, itunes=itunes)
+    await user.should_see("1 release(s) have exactly this CD identifier")
+    select_named(user, "Cover").set_value("itunes")
+    await user.should_see("Selected: Karlsson vom Dach 1")
+    await click(user, "Apply to 6")
+    assert ("full", "Karlsson vom Dach 1") in itunes.calls
+    assert not any(c[0] == "cover" for c in fake.calls)  # the archive's cover was not fetched
+
+
+async def test_switching_back_to_the_archive_clears_the_candidates(
+    user: User, music_root, cd, monkeypatch
+):
+    itunes = FakeITunes([candidate("A"), candidate("B")])
+    fake = FakeMusicBrainz(by_disc=[fit_lengths(fixture_release())])
+    await open_lookup(user, music_root, monkeypatch, cd, fake, itunes=itunes)
+    await user.should_see("1 release(s) have exactly this CD identifier")
+    select_named(user, "Cover").set_value("itunes")
+    await user.should_see("Selected: A")
+    select_named(user, "Cover").set_value("caa")
+    await asyncio.sleep(0.1)
+    assert cards(user) == []
+    await click(user, "Apply to 6")
+    assert any(c[0] == "cover" for c in fake.calls) and not any(
+        c[0] == "full" for c in itunes.calls
+    )
+
+
+async def test_an_iTunes_error_is_shown_and_the_tags_can_still_be_applied(
+    user: User, music_root, cd, monkeypatch
+):
+    release = replace(fit_lengths(fixture_release()), has_front_cover=False)
+    itunes = FakeITunes(error=ITunesError("iTunes is busy, please try again in a moment"))
+    await open_lookup(
+        user, music_root, monkeypatch, cd, FakeMusicBrainz(by_disc=[release]), itunes=itunes
+    )
+    await user.should_see("iTunes is busy")
+    await click(user, "Apply to 6")
+    assert row_for(user, cd[0])["title"] == "Karlsson vom Dach, Teil 1"
+    assert row_for(user, cd[0])["cover"] == ""
+
+
+async def test_a_chosen_cover_that_cannot_be_downloaded_does_not_stop_the_tags(
+    user: User, music_root, cd, monkeypatch
+):
+    release = replace(fit_lengths(fixture_release()), has_front_cover=False)
+    itunes = FakeITunes(
+        [candidate("Karlsson vom Dach 1")], cover=ITunesError("The cover image is not square")
+    )
+    await open_lookup(
+        user, music_root, monkeypatch, cd, FakeMusicBrainz(by_disc=[release]), itunes=itunes
+    )
+    await user.should_see("Selected: Karlsson vom Dach 1")
+    await click(user, "Apply to 6")
+    await user.should_see("The cover could not be loaded")
+    assert row_for(user, cd[0])["title"] == "Karlsson vom Dach, Teil 1"
+    assert row_for(user, cd[0])["cover"] == ""
+
+
+async def test_keeping_the_covers_sends_nothing_anywhere(user: User, music_root, cd, monkeypatch):
+    itunes = FakeITunes([candidate("X")])
+    fake = FakeMusicBrainz(by_disc=[fit_lengths(fixture_release())])
+    await open_lookup(user, music_root, monkeypatch, cd, fake, itunes=itunes)
+    await user.should_see("1 release(s) have exactly this CD identifier")
+    select_named(user, "Cover").set_value("none")
+    await click(user, "Apply to 6")
+    assert itunes.calls == [] and not any(c[0] == "cover" for c in fake.calls)
     assert row_for(user, cd[0])["cover"] == ""
 
 

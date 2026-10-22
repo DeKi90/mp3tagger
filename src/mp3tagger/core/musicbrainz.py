@@ -15,6 +15,7 @@ from typing import Any, Literal
 import httpx
 
 from mp3tagger.core.discid import Toc
+from mp3tagger.core.http import PoliteClient, ServiceError
 from mp3tagger.core.images import sniff_image
 from mp3tagger.core.models import CoverArt
 
@@ -22,10 +23,9 @@ API = "https://musicbrainz.org/ws/2"
 COVER_ART = "https://coverartarchive.org"
 RELEASE_INCLUDES = "artist-credits+labels+recordings+release-groups"
 Source = Literal["disc id", "toc", "search", "id"]
-_RETRY_STATUSES = {429, 502, 503, 504}
 
 
-class MusicBrainzError(Exception):
+class MusicBrainzError(ServiceError):
     """A lookup failed. The message is meant to be shown to the user."""
 
 
@@ -145,50 +145,22 @@ class MusicBrainz:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._http = httpx.AsyncClient(
-            headers={"User-Agent": _user_agent(contact), "Accept": "application/json"},
+        self._http = PoliteClient(
+            "MusicBrainz",
+            user_agent=_user_agent(contact),
+            error=MusicBrainzError,
             transport=transport,
-            timeout=20,
-            follow_redirects=True,
+            min_interval=min_interval,
+            max_retries=max_retries,
+            sleep=sleep,
+            clock=clock,
         )
-        self._min_interval = min_interval
-        self._max_retries = max_retries
-        self._sleep, self._clock = sleep, clock
-        self._lock = asyncio.Lock()
-        self._last_request: float | None = None
 
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def _wait_turn(self) -> None:
-        if self._last_request is not None:
-            wait = self._last_request + self._min_interval - self._clock()
-            if wait > 0:
-                await self._sleep(wait)
-        self._last_request = self._clock()
-
     async def _get(self, url: str, params: dict[str, str] | None = None) -> httpx.Response | None:
-        """GET with rate limiting and retries. None for 404; MusicBrainzError for other failures."""
-        problem = "MusicBrainz did not answer"
-        for attempt in range(self._max_retries + 1):
-            async with self._lock:  # one request at a time, spaced out
-                await self._wait_turn()
-                try:
-                    response = await self._http.get(url, params=params)
-                except httpx.TransportError as exc:
-                    problem = f"Cannot reach MusicBrainz ({type(exc).__name__})"
-                    response = None
-            if response is not None:
-                if response.status_code == 404:
-                    return None
-                if response.status_code < 400:
-                    return response
-                if response.status_code not in _RETRY_STATUSES:
-                    raise MusicBrainzError(_error_text(response))
-                problem = "MusicBrainz is busy, please try again in a moment"
-            if attempt < self._max_retries:
-                await self._sleep(_backoff(attempt, response))
-        raise MusicBrainzError(problem)
+        return await self._http.get(url, params)
 
     async def _releases(self, path: str, source: Source, params: dict[str, str]) -> list[Release]:
         response = await self._get(f"{API}/{path}", {"fmt": "json", **params})
@@ -246,19 +218,3 @@ class MusicBrainz:
 def _lucene(value: str) -> str:
     """Make `value` safe inside a quoted Lucene phrase."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _backoff(attempt: int, response: httpx.Response | None) -> float:
-    retry_after = response.headers.get("Retry-After") if response is not None else None
-    if retry_after and retry_after.isdigit():
-        return min(float(retry_after), 30.0)
-    return min(1.5 * 2**attempt, 30.0)
-
-
-def _error_text(response: httpx.Response) -> str:
-    try:
-        detail = response.json().get("error")
-    except ValueError:
-        detail = None
-    reason = detail or response.reason_phrase
-    return f"MusicBrainz refused the request (HTTP {response.status_code}): {reason}"

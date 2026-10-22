@@ -62,7 +62,7 @@ tests/
 - [x] 5. **Cover art:** view, add, replace, extract, remove, move to folder (`cover.jpg`/`cover.png`, removes the embedded picture), folder image fallback with embed-from-folder.
 - [x] 6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview), tag to tag, auto-numbering.
 - [x] 7. **Transforms:** case conversion, find/replace with regex.
-- [x] 8. **Online lookup:** MusicBrainz import with preview and field mapping, starting from the CD identifier in the MCDI frame (Discogs deferred).
+- [x] 8. **Online lookup:** MusicBrainz import with preview and field mapping, starting from the CD identifier in the MCDI frame; cover art from the Cover Art Archive or an iTunes search (square covers, ranked by title match). Discogs deferred.
 - [ ] 9. **Docker:** Dockerfile, root sandbox hardening, env config, docs.
 - [ ] 10. **Optional features:** undo polish, filter/search, actions, export, technical info, playlists.
 

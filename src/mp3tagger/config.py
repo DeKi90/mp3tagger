@@ -13,10 +13,14 @@ class Config:
     # Shown to MusicBrainz in the User-Agent so they can reach whoever runs this (an e-mail
     # address or a URL). They ask for it but it is optional.
     contact: str = ""
+    # Country of the iTunes store searched for cover art (two letters); decides which releases
+    # and titles are found, e.g. "de" for German audiobooks.
+    cover_country: str = "de"
 
     @classmethod
     def from_env(cls) -> Config:
-        """Build a config from MP3TAGGER_ROOTS (os.pathsep separated), _HOST, _PORT and _CONTACT."""
+        """Build a config from MP3TAGGER_ROOTS (os.pathsep separated) and MP3TAGGER_HOST, _PORT,
+        _CONTACT and _COVER_COUNTRY."""
         defaults = cls()
         raw_roots = os.environ.get("MP3TAGGER_ROOTS")
         roots = (
@@ -29,4 +33,5 @@ class Config:
             host=os.environ.get("MP3TAGGER_HOST", defaults.host),
             port=int(os.environ.get("MP3TAGGER_PORT", defaults.port)),
             contact=os.environ.get("MP3TAGGER_CONTACT", defaults.contact),
+            cover_country=os.environ.get("MP3TAGGER_COVER_COUNTRY", defaults.cover_country),
         )

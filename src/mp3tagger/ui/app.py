@@ -9,6 +9,7 @@ from mp3tagger.core.batch import KEEP, ShownCover, merge_covers, merge_tags
 from mp3tagger.core.editing import EditBuffer
 from mp3tagger.core.folder_cover import FolderCover, load_folder_covers
 from mp3tagger.core.images import EXTENSIONS, FOLDER_COVER_NAMES, sniff_image
+from mp3tagger.core.itunes import ITunes
 from mp3tagger.core.library import load_covers, scan_folder
 from mp3tagger.core.lookup import LocalFile, scan_discs
 from mp3tagger.core.models import UNCHANGED, CoverArt, MoveCoverToFolder, TagSet
@@ -40,17 +41,26 @@ window.addEventListener('keydown', (e) => {
 """
 
 
-def build_app(config: Config, musicbrainz: MusicBrainz | None = None) -> None:
-    """Register the page. `musicbrainz` is injectable for tests; by default one client is shared
-    by all sessions, so MusicBrainz's request limit holds for the whole process."""
+def build_app(
+    config: Config, musicbrainz: MusicBrainz | None = None, itunes: ITunes | None = None
+) -> None:
+    """Register the page. `musicbrainz` and `itunes` are injectable for tests; by default one
+    client of each is shared by all sessions, so the services' request limits hold for the whole
+    process."""
     sandbox = Sandbox(config.roots)
     reader, writer = Id3Reader(), Id3Writer()
     shared: list[MusicBrainz] = [musicbrainz] if musicbrainz else []
+    shared_itunes: list[ITunes] = [itunes] if itunes else []
 
     def musicbrainz_client() -> MusicBrainz:
         if not shared:  # created on first use, inside the running event loop
             shared.append(MusicBrainz(contact=config.contact))
         return shared[0]
+
+    def itunes_client() -> ITunes:
+        if not shared_itunes:
+            shared_itunes.append(ITunes(country=config.cover_country))
+        return shared_itunes[0]
 
     @ui.page("/")
     def index() -> None:
@@ -296,7 +306,7 @@ def build_app(config: Config, musicbrainz: MusicBrainz | None = None) -> None:
             ]
             first = tags[editable[0]]
             result = await lookup_dialog(
-                musicbrainz_client(), files, scan, first.artist, first.album
+                musicbrainz_client(), itunes_client(), files, scan, first.artist, first.album
             )
             if result is None:
                 return

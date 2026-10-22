@@ -17,7 +17,7 @@ Python based (web) GUI to manipulate ID3 audio file tags.
 - [x] Auto-numbering of tracks
 - [x] Case conversion (upper, lower, title case, sentence case)
 - [x] Find and replace in tag fields, with regular expression support
-- [x] Import tags from online databases (e.g. MusicBrainz, Discogs) — MusicBrainz only so far, looked up from the CD identifier (MCDI) or by name
+- [x] Import tags from online databases (e.g. MusicBrainz, Discogs) — MusicBrainz only so far, looked up from the CD identifier (MCDI) or by name; covers from the Cover Art Archive or an iTunes search
 
 ## Optional features
 
