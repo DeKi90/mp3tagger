@@ -27,3 +27,20 @@ Python based (web) GUI to manipulate ID3 audio file tags.
 - [x] Undo and save changes (explicit save, with indication of modified files)
 - [ ] Export the file list / tags (e.g. CSV, HTML)
 - [x] Display of technical file information (bitrate, sample rate, duration, size)
+
+## Configuration
+
+Set through environment variables (in the Home Assistant app: the app's options).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MP3TAGGER_ROOTS` | `~/Music` | Folders the app may open and change; separate several with `:` |
+| `MP3TAGGER_HOST` / `MP3TAGGER_PORT` | `127.0.0.1` / `8080` | Where the web server listens |
+| `MP3TAGGER_CONTACT` | – | E-mail or web address sent to MusicBrainz in the User-Agent (optional) |
+| `MP3TAGGER_COVER_COUNTRY` | `de` | Two-letter iTunes store country used for the cover search |
+
+## Running
+
+- `poetry run mp3tagger` – locally
+- Docker and Home Assistant: see the [repository readme](../README.md)
+

@@ -1,0 +1,11 @@
+# Only pyproject.toml, poetry.lock and src/ are needed to build the images.
+.venv
+.git
+.pytest_cache
+.ruff_cache
+**/__pycache__
+tests
+*.md
+!DOCS.md
+PLAN.md
+poetry.toml

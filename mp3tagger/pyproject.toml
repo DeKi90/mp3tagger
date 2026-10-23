@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 mp3tagger = "mp3tagger.__main__:main"
+mp3tagger-ha = "mp3tagger.homeassistant:main"
 
 [tool.poetry]
 packages = [{ include = "mp3tagger", from = "src" }]
@@ -41,5 +42,6 @@ build-backend = "poetry.core.masonry.api"
 dev = [
     "pytest (>=9.1.1,<10.0.0)",
     "ruff (>=0.17.1,<0.18.0)",
-    "pytest-asyncio (>=1.4.0,<2.0.0)"
+    "pytest-asyncio (>=1.4.0,<2.0.0)",
+    "pyyaml (>=6.0.3,<7.0.0)"
 ]

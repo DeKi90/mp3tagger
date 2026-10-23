@@ -1,0 +1,18 @@
+configuration:
+  music_folders:
+    name: Music folders
+    description: >-
+      Folders the app may open and change, e.g. /media/music. Everything outside them is out of
+      reach. /media and /share are the folders Home Assistant shares with apps.
+  contact:
+    name: Contact for MusicBrainz
+    description: >-
+      An e-mail address or web address sent to MusicBrainz in the User-Agent, so they can reach
+      you if the app misbehaves. Optional.
+  cover_country:
+    name: iTunes store country
+    description: >-
+      Two-letter country code of the iTunes store searched for cover art, e.g. de, at, us. It
+      decides which releases and titles are found.
+network:
+  8099/tcp: Web interface without Home Assistant login (leave empty to use the sidebar)

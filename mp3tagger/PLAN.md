@@ -63,7 +63,7 @@ tests/
 - [x] 6. **Converters:** pattern engine, then filename to tag, tag to filename (with preview; patterns with `/` sort files into folders below the open folder), tag to tag, auto-numbering.
 - [x] 7. **Transforms:** case conversion, find/replace with regex.
 - [x] 8. **Online lookup:** MusicBrainz import with preview and field mapping, starting from the CD identifier in the MCDI frame; cover art from the Cover Art Archive or an iTunes search (square covers, ranked by title match). Discogs deferred.
-- [ ] 9. **Docker:** Dockerfile, root sandbox hardening, env config, docs.
+- [x] 9. **Docker:** one Dockerfile, two images: `standalone` (plain Docker, non-root, health check) and `homeassistant` (Home Assistant app with ingress, options from `/data/options.json`, built by Home Assistant from the app folder `mp3tagger/`). Path sandbox, env config and docs done; the repo is laid out as a Home Assistant app repository (`repository.yaml` + app folder).
 - [ ] 10. **Optional features:** undo polish, filter/search, actions, export, technical info, playlists.
 
 
